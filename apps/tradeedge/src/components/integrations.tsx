@@ -1,7 +1,8 @@
 // Settings ▸ Integrations (Bikram, 2026-10-10): the services TradeEdge connects to with the person's
-// own keys, one list, each row expanding in place: SnapTrade (key, brokers and their accounts, sync,
-// webhook), Manual accounts (only brokers SnapTrade can't reach) and Alpaca (live data key). Brokers
-// are linked in SnapTrade's own portal, in a new tab. The header's sync status sits in the middle.
+// own keys, one list, each row expanding in place: SnapTrade (key, sync, webhook) and Alpaca (live
+// data key). Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
+// SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
+// Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
   type IntegrationsStatus,
   type Portfolio,
@@ -23,7 +24,13 @@ import {
   writeTransactions,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { ConfirmDelete, type SettingsSectionDef, StatusItem, usePrefs } from '@edgedesk/app-shell';
+import {
+  ConfirmDelete,
+  type SettingsSectionDef,
+  StatusItem,
+  usePrefs,
+  useShell,
+} from '@edgedesk/app-shell';
 import { Badge } from '@edgedesk/app-shell/ui/badge';
 import { Button } from '@edgedesk/app-shell/ui/button';
 import {
@@ -54,6 +61,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   ExternalLinkIcon,
+  LandmarkIcon,
   LinkIcon,
   PlugIcon,
   PlusIcon,
@@ -373,7 +381,6 @@ function SnapTradeConnected({
 }: { st: Extract<IntegrationsStatus['snaptrade'], { connected: true }> }) {
   const qc = useQueryClient();
   const clock = useClock();
-  const portal = usePortal();
   const [copied, setCopied] = useState(false);
   const hookInput = useRef<HTMLInputElement>(null);
   /** Phone browsers can refuse the async clipboard; fall back to copying the selected field. */
@@ -401,32 +408,10 @@ function SnapTradeConnected({
   const report = sync.data ?? st.last_sync;
   // The add-on note goes once SnapTrade sends lots for any synced account.
   const holdings = useQuery(holdingsAccountsQuery());
-  const brokerLots = holdings.data?.some((a) => a.lots_source === 'broker') ?? false;
+  const brokerLots =
+    holdings.data?.some((a) => a.lots.some((l) => l.source === 'snaptrade')) ?? false;
   return (
     <>
-      <Section
-        title="Brokers and accounts"
-        action={
-          <Button size="sm" variant="outline" onClick={() => portal.mutate(undefined)}>
-            <PlusIcon />
-            Add broker
-          </Button>
-        }
-      >
-        <ErrorLine error={portal.error} />
-        {st.error ? (
-          <p role="alert" className="text-xs text-loss">
-            SnapTrade couldn't be reached: {st.error}
-          </p>
-        ) : (st.brokers ?? []).length ? (
-          (st.brokers ?? []).map((b) => <BrokerBlock key={b.id} broker={b} />)
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No brokers yet. Add one: you sign in on SnapTrade's page, and EdgeDesk never sees your
-            broker password.
-          </p>
-        )}
-      </Section>
       <Section title="Sync">
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <SyncLine report={report} />
@@ -604,7 +589,7 @@ function ManualAccount({ account }: { account: Portfolio }) {
           ],
         });
       } else if (form === 'lot') {
-        const mine = account.lots_source === 'yours' ? account.lots : [];
+        const mine = account.lots.filter((l) => l.source === 'manual');
         await writeLots(account.id, [
           ...mine
             .filter((l) => !/\s/.test(l.symbol))
@@ -833,8 +818,8 @@ function ManualAccounts({ onSnapTrade }: { onSnapTrade: () => void }) {
   return (
     <>
       <p className="text-sm text-muted-foreground">
-        Only for brokers SnapTrade can't reach, like SoFi. A broker SnapTrade supports is linked
-        under SnapTrade instead.
+        Only for brokers SnapTrade can't reach, like SoFi. A broker SnapTrade supports is added
+        under Brokers instead.
       </p>
       {manual.map((a) => (
         <ManualAccount key={a.id} account={a} />
@@ -880,7 +865,8 @@ function ManualAccounts({ onSnapTrade }: { onSnapTrade: () => void }) {
             <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-loss">
               {errorText(add.error)}
               <Button type="button" size="xs" variant="outline" onClick={onSnapTrade}>
-                Open SnapTrade
+                <PlusIcon />
+                Add broker
               </Button>
             </p>
           ) : (
@@ -1015,7 +1001,6 @@ function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
 
 function Integrations() {
   const q = useQuery(integrationsQuery());
-  const accounts = useQuery(holdingsAccountsQuery());
   const [open, setOpen] = useState<string | null>('snaptrade');
   const toggle = (id: string) => (o: boolean) => setOpen(o ? id : null);
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
@@ -1023,7 +1008,6 @@ function Integrations() {
   const st = q.data.snaptrade;
   const brokers = st.connected ? (st.brokers ?? []) : [];
   const broken = brokers.filter((b) => b.broken).length;
-  const manualCount = (accounts.data ?? []).filter((a) => a.source === 'manual').length;
   return (
     <div className="grid grid-cols-1">
       <IntegrationRow
@@ -1050,19 +1034,6 @@ function Integrations() {
         {st.connected ? <SnapTradeConnected st={st} /> : <SnapTradeConnect />}
       </IntegrationRow>
       <IntegrationRow
-        name="Manual accounts"
-        meta="Brokers SnapTrade can't reach"
-        open={open === 'manual'}
-        onOpenChange={toggle('manual')}
-        badge={
-          <Badge variant="outline">
-            {manualCount} account{manualCount === 1 ? '' : 's'}
-          </Badge>
-        }
-      >
-        <ManualAccounts onSnapTrade={() => setOpen('snaptrade')} />
-      </IntegrationRow>
-      <IntegrationRow
         name="Alpaca"
         meta="Live quotes and option chains"
         open={open === 'alpaca'}
@@ -1084,12 +1055,76 @@ function Integrations() {
   );
 }
 
+// ── Brokers and accounts (Bikram, 2026-10-11): what the person holds, apart from the keys ──
+
+function BrokersAndAccounts() {
+  const q = useQuery(integrationsQuery());
+  const portal = usePortal();
+  const { openSettings } = useShell();
+  if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  if (q.isError) return <ErrorLine error={q.error} />;
+  const st = q.data.snaptrade;
+  return (
+    <div className="grid grid-cols-1 gap-6">
+      <Section
+        title="Brokers"
+        action={
+          st.connected ? (
+            <Button size="sm" variant="outline" onClick={() => portal.mutate(undefined)}>
+              <PlusIcon />
+              Add broker
+            </Button>
+          ) : null
+        }
+      >
+        <ErrorLine error={portal.error} />
+        {!st.connected ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="flex-1 text-sm text-muted-foreground">
+              Brokers sync through SnapTrade. Connect it first, with your own key.
+            </p>
+            <Button size="sm" variant="outline" onClick={() => openSettings('integrations')}>
+              <PlugIcon />
+              Connect SnapTrade
+            </Button>
+          </div>
+        ) : st.error ? (
+          <p role="alert" className="text-xs text-loss">
+            SnapTrade couldn't be reached: {st.error}
+          </p>
+        ) : (st.brokers ?? []).length ? (
+          (st.brokers ?? []).map((b) => <BrokerBlock key={b.id} broker={b} />)
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No brokers yet. Add one: you sign in on SnapTrade's page, and EdgeDesk never sees your
+            broker password.
+          </p>
+        )}
+      </Section>
+      <Section title="Manual accounts">
+        <ManualAccounts
+          onSnapTrade={() =>
+            st.connected ? portal.mutate(undefined) : openSettings('integrations')
+          }
+        />
+      </Section>
+    </div>
+  );
+}
+
 export const INTEGRATION_SETTINGS: SettingsSectionDef[] = [
+  {
+    id: 'accounts',
+    title: 'Brokers and accounts',
+    icon: LandmarkIcon,
+    description: 'Your brokers, their accounts and manual accounts.',
+    content: <BrokersAndAccounts />,
+  },
   {
     id: 'integrations',
     title: 'Integrations',
     icon: PlugIcon,
-    description: 'SnapTrade, manual accounts and Alpaca, with your own keys.',
+    description: 'SnapTrade and Alpaca, with your own keys.',
     content: <Integrations />,
   },
 ];

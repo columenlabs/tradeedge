@@ -75,13 +75,16 @@ export type { ViewCellValue, ViewDomain, ViewField } from './view-model';
 export { rollUp } from './view-model';
 export type { ViewEditorSection } from './view-editor';
 
-/** Rows of one group that share the domain's merge key, folded into one row each. */
+/**
+ * Rows that share the domain's merge key, folded into one row each: within each group, or across
+ * every row when nothing is grouped (Bikram, 2026-10-11: no duplicate rows in the flat table).
+ */
 function mergeRows<T>(domain: ViewDomain<T>, rows: T[], groupBy: ViewField<T> | null): T[] {
   const merge = domain.merge;
-  if (!merge || !groupBy) return rows;
+  if (!merge) return rows;
   const m = new Map<string, T[]>();
   for (const r of rows) {
-    const k = `${label(groupBy.value(r))}\u0000${merge.key(r)}`;
+    const k = `${groupBy ? label(groupBy.value(r)) : ''}\u0000${merge.key(r)}`;
     m.set(k, [...(m.get(k) ?? []), r]);
   }
   return [...m.values()].map((rs) => (rs.length > 1 ? merge.rows(rs) : (rs[0] as T)));

@@ -15,6 +15,17 @@ import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
 import type { HistoryService } from '../../history';
 import { type UserVault, type Vault, docWrite, withRetry } from '../../vault';
+import {
+  type CloseOn,
+  type ClosedLot,
+  type Dividends,
+  type LotCheck,
+  type LotCost,
+  type StoredLot,
+  type TaxLot,
+  accountLots,
+  lotAverage,
+} from './lots';
 
 const MAX_POSITIONS = 500;
 
@@ -106,71 +117,16 @@ export interface PortfolioSummary {
 }
 export interface Portfolio extends Omit<PortfolioSummary, 'positions'> {
   positions: Position[];
-  /**
-   * Open tax lots: the broker's (`lots_source` broker, synced from SnapTrade), the ones you entered
-   * (yours, manual accounts) or, without either, derived first-in first-out from the buys and sells.
-   */
+  /** Open tax lots, each with its `source` (`lots.ts`). */
   lots: TaxLot[];
-  lots_source: 'broker' | 'yours' | 'transactions';
   /** Gains closed this calendar year (trade dates), FIFO against the lots, fees included. */
   realized_ytd: { total: number; short_term: number };
   /** Every lot closed so far, FIFO from the buys and sells, oldest close first; the realized gains in full. */
   closed_lots: ClosedLot[];
-  /**
-   * Holdings whose open lots do not add up to the held quantity, so an agent can fix the data.
-   * Only for an account with lots or buys and sells on record.
-   */
-  checks: { symbol: string; held: number; in_lots: number }[];
-}
-export interface TaxLot {
-  symbol: string;
-  acquired: string;
-  /** Negative for a short lot. */
-  quantity: number;
-  /** Per share, in USD, fees included. */
-  cost: number;
-  /** long once held more than a year. */
-  term: 'short' | 'long';
-  /**
-   * Set when the cost is not the lot's own (Bikram, 2026-10-11; RSU and transferred-in lots often
-   * come with cost 0): `yours`, set with portfolio_lot_cost_write; `transaction`, the price of that
-   * day's transaction; `estimate`, the unadjusted close on the acquired day; `missing`, none of
-   * these, so the cost stays 0.
-   */
-  cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
-  /**
-   * Where the lot comes from (Bikram, 2026-10-11): `snaptrade`, the broker's lot synced from
-   * SnapTrade; `derived`, worked out first-in first-out from the buys and sells; `manual`, entered
-   * for a manual account (portfolio_lot_write).
-   */
-  source?: LotSource;
-}
-export type LotSource = 'snaptrade' | 'derived' | 'manual';
-/** A cost you set for the lots of one symbol acquired on one day (all of them, or the one of `quantity`). */
-export interface LotCost {
-  symbol: string;
-  acquired: string;
-  quantity?: number;
-  cost: number;
-}
-/** A lot, or the part of one, that a later trade closed. */
-export interface ClosedLot {
-  symbol: string;
-  underlying: string;
-  expiration: number | null;
-  strike: number | null;
-  right: 'C' | 'P' | null;
-  acquired: string;
-  closed: string;
-  /** Negative for a short lot. */
-  quantity: number;
-  /** What was paid in USD, fees included (what a short lot paid to buy back). */
-  cost: number;
-  /** What was received in USD, fees included (what a short lot was sold for). */
-  proceeds: number;
-  gain: number;
-  /** long when held more than a year. */
-  term: 'short' | 'long';
+  /** Holdings whose open lots do not add up to the held quantity, with where their lots come from. */
+  checks: LotCheck[];
+  /** Dividends per symbol from the dividend transactions: all on record and this year's. */
+  dividends: Dividends[];
 }
 
 const MAX_TRANSACTIONS = 1000;
@@ -266,111 +222,6 @@ export interface Transaction {
   description?: string | null;
 }
 
-interface Trade {
-  symbol: string;
-  underlying?: string | null;
-  expiration: number | null;
-  strike?: number | null;
-  right?: 'C' | 'P' | null;
-  trade_date: string;
-  kind: 'buy' | 'sell';
-  quantity: number;
-  price: number;
-  fees: number;
-}
-
-/**
- * Open lots per symbol: a trade first closes opposite lots oldest-first, the rest opens a new lot.
- * Closing part of a lot realizes its gain; a gain counts as short-term when the lot was held a year
- * or less.
- */
-export function fifoLots(
-  trades: Trade[],
-  today = new Date(),
-): {
-  lots: TaxLot[];
-  realized_ytd: { total: number; short_term: number };
-  closed: ClosedLot[];
-} {
-  const open = new Map<string, { acquired: string; quantity: number; cost: number }[]>();
-  const year = String(today.getUTCFullYear());
-  const realized = { total: 0, short_term: 0 };
-  const closed: ClosedLot[] = [];
-  for (const t of trades) {
-    const mult = t.expiration ? 100 : 1;
-    const perShare = t.price + ((t.kind === 'buy' ? 1 : -1) * t.fees) / (t.quantity * mult);
-    const lots = open.get(t.symbol) ?? [];
-    let left = (t.kind === 'buy' ? 1 : -1) * t.quantity;
-    while (left !== 0 && lots.length && Math.sign(lots[0]?.quantity ?? 0) !== Math.sign(left)) {
-      const lot = lots[0] as { acquired: string; quantity: number; cost: number };
-      const take = Math.min(Math.abs(lot.quantity), Math.abs(left));
-      const gain = Math.sign(lot.quantity) * (perShare - lot.cost) * take * mult;
-      const short = !heldOverYear(lot.acquired, t.trade_date);
-      if (t.trade_date.startsWith(year)) {
-        realized.total += gain;
-        if (short) realized.short_term += gain;
-      }
-      const [paid, got] = lot.quantity > 0 ? [lot.cost, perShare] : [perShare, lot.cost];
-      closed.push({
-        symbol: t.symbol,
-        underlying: t.underlying ?? t.symbol,
-        expiration: t.expiration,
-        strike: t.strike ?? null,
-        right: t.right ?? null,
-        acquired: lot.acquired,
-        closed: t.trade_date,
-        quantity: Math.sign(lot.quantity) * take,
-        cost: cents(paid * take * mult),
-        proceeds: cents(got * take * mult),
-        gain: cents(gain),
-        term: short ? 'short' : 'long',
-      });
-      lot.quantity -= Math.sign(lot.quantity) * take;
-      left -= Math.sign(left) * take;
-      if (lot.quantity === 0) lots.shift();
-    }
-    if (left !== 0) {
-      lots.push({ acquired: t.trade_date, quantity: left, cost: Math.round(perShare * 1e4) / 1e4 });
-    }
-    open.set(t.symbol, lots);
-  }
-  const cutoff = yearBefore(today.toISOString().slice(0, 10));
-  const lots = [...open.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([symbol, lots]) =>
-      lots.map((l) => ({ symbol, ...l, term: l.acquired < cutoff ? 'long' : 'short' }) as TaxLot),
-    );
-  return {
-    lots,
-    realized_ytd: { total: cents(realized.total), short_term: cents(realized.short_term) },
-    closed,
-  };
-}
-
-const cents = (v: number) => Math.round(v * 100) / 100;
-
-/** YYYY-MM-DD one year earlier. */
-const yearBefore = (iso: string) => `${Number(iso.slice(0, 4)) - 1}${iso.slice(4)}`;
-const heldOverYear = (acquired: string, closed: string) => acquired < yearBefore(closed);
-
-/** Held quantity against open lots, per symbol; only mismatches. */
-export function lotChecks(
-  positions: Pick<Position, 'symbol' | 'quantity'>[],
-  lots: TaxLot[],
-): Portfolio['checks'] {
-  const inLots = new Map<string, number>();
-  for (const l of lots) inLots.set(l.symbol, (inLots.get(l.symbol) ?? 0) + l.quantity);
-  const held = new Map(
-    positions.filter((p) => p.symbol !== MARGIN_CASH).map((p) => [p.symbol, p.quantity]),
-  );
-  const symbols = [...new Set([...held.keys(), ...inLots.keys()])].sort();
-  return symbols.flatMap((symbol) => {
-    const h = held.get(symbol) ?? 0;
-    const l = inLots.get(symbol) ?? 0;
-    return Math.abs(h - l) > 1e-6 ? [{ symbol, held: h, in_lots: l }] : [];
-  });
-}
-
 /** Stock: the ticker. Option: the OCC symbol (`QQQ261120P00480000`). */
 export function positionSymbol(p: z.infer<typeof positionSchema>): string {
   if (p.expiration === undefined || p.strike === undefined || !p.right) return p.underlying;
@@ -449,9 +300,6 @@ export const lotWriteShape = {
 };
 export type LotInput = z.infer<typeof lotSchema>;
 
-/** A lot as stored: the term is worked out on read. */
-type StoredLot = Omit<TaxLot, 'term' | 'source'>;
-
 /** One SnapTrade account as the sync hands it over (`snaptrade.ts`). */
 export interface SyncedAccount {
   snaptrade_account_id: string;
@@ -490,114 +338,37 @@ const byDateThenId = (a: Transaction, b: Transaction) =>
   a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 const newestFirst = (a: Transaction, b: Transaction) => byDateThenId(b, a);
 
-const toTrades = (rows: Transaction[]): Trade[] =>
-  rows
-    .filter((t) => t.kind === 'buy' || t.kind === 'sell')
-    .sort(byDateThenId)
-    .map((t) => ({
-      symbol: t.symbol ?? '',
-      underlying: t.underlying,
-      expiration: t.expiration,
-      strike: t.strike,
-      right: t.right,
-      trade_date: t.date,
-      kind: t.kind as Trade['kind'],
-      quantity: t.quantity ?? 0,
-      price: t.price ?? 0,
-      fees: t.fees,
-    }));
-
-const withTerm = (lots: StoredLot[], today = new Date()): TaxLot[] => {
-  const cutoff = yearBefore(today.toISOString().slice(0, 10));
-  return lots.map((l) => ({ ...l, term: l.acquired < cutoff ? 'long' : 'short' }));
-};
-
-const OCC = /\d{6}[CP]\d{8}$/;
 /** YYYY-MM-DD `n` days later (earlier when negative). */
 const addDays = (iso: string, n: number) =>
   new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
-/** The close on `date`, or the last one before it within a week; null when there is none. */
-type CloseOn = (symbol: string, date: string) => number | null;
-
-/**
- * Lot costs, first that has one (Bikram, 2026-10-11): yours, the lot's own when not 0, the price of
- * a transaction of that symbol on the acquired day, the close that day (an estimate). Options keep
- * their own cost.
- */
-function costedLots(lots: TaxLot[], own: LotCost[], rows: Transaction[], close: CloseOn) {
-  return lots.map((l): TaxLot => {
-    const mine =
-      own.find(
-        (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === l.quantity,
-      ) ??
-      own.find(
-        (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === undefined,
-      );
-    if (mine) return { ...l, cost: mine.cost, cost_from: 'yours' };
-    if (l.cost > 0 || OCC.test(l.symbol)) return l;
-    const same = rows.filter(
-      (t) =>
-        t.symbol === l.symbol &&
-        t.expiration === null &&
-        t.date === l.acquired &&
-        (t.price ?? 0) > 0,
-    );
-    const tx = same.find((t) => t.quantity === Math.abs(l.quantity)) ?? same[0];
-    if (tx?.price) return { ...l, cost: tx.price, cost_from: 'transaction' };
-    const est = close(l.symbol, l.acquired);
-    return est ? { ...l, cost: est, cost_from: 'estimate' } : { ...l, cost_from: 'missing' };
-  });
-}
-
-/** A stock position the broker sent without an average cost takes its open lots' average. */
-function withLotCost(p: Position, lots: TaxLot[]): Position {
-  if ((p.avg_cost ?? 0) > 0 || p.expiration !== null || p.symbol === MARGIN_CASH) return p;
-  const mine = lots.filter((l) => l.symbol === p.symbol);
-  const qty = mine.reduce((s, l) => s + l.quantity, 0);
-  if (!mine.length || !qty || mine.some((l) => l.cost <= 0)) return p;
-  const avg = mine.reduce((s, l) => s + l.cost * l.quantity, 0) / qty;
-  return { ...p, avg_cost: Math.round(avg * 1e4) / 1e4, avg_cost_from: 'lots' };
-}
-
+/** An account in full: its positions with their lots, checks and realized gains (`lots.ts`). */
 const full = (
-  head: Omit<Portfolio, 'lots' | 'lots_source' | 'realized_ytd' | 'closed_lots' | 'checks'> & {
+  head: Omit<Portfolio, 'lots' | 'realized_ytd' | 'closed_lots' | 'checks' | 'dividends'> & {
     lot_costs?: LotCost[];
   },
   rows: Transaction[],
   stored: StoredLot[] | null,
   close: CloseOn = () => null,
-) => {
-  const { lot_costs: own = [], ...rest } = head;
-  const done = toTrades(rows);
-  const fifo = fifoLots(done);
-  const source: LotSource = stored
-    ? head.source === 'snaptrade'
-      ? 'snaptrade'
-      : 'manual'
-    : 'derived';
-  const lots = costedLots(stored ? withTerm(stored) : fifo.lots, own, rows, close).map((l) => ({
-    ...l,
-    source,
-  }));
+): Portfolio => {
+  const { lot_costs: costs = [], ...rest } = head;
+  const math = accountLots({
+    held: rest.positions,
+    stored,
+    storedSource: rest.source === 'snaptrade' ? 'snaptrade' : 'manual',
+    rows,
+    costs,
+    close,
+    skip: MARGIN_CASH,
+  });
   return {
     ...rest,
-    positions: rest.positions.map((p) => withLotCost(p, lots)),
-    lots,
-    lots_source: stored ? (head.source === 'snaptrade' ? 'broker' : 'yours') : 'transactions',
-    realized_ytd: fifo.realized_ytd,
-    closed_lots: fifo.closed,
-    // SnapTrade sends lots for stock and funds only, so a synced account's options are not checked.
-    checks:
-      stored || done.length
-        ? lotChecks(
-            stored && head.source === 'snaptrade'
-              ? head.positions.filter((p) => p.expiration === null)
-              : head.positions,
-            lots,
-          )
-        : [],
-  } as Portfolio;
+    positions: rest.positions.map((p) => {
+      const avg = p.symbol === MARGIN_CASH ? null : lotAverage(p, math.lots);
+      return avg === null ? p : { ...p, avg_cost: avg, avg_cost_from: 'lots' as const };
+    }),
+    ...math,
+  };
 };
 
 const toPosition = (p: z.infer<typeof positionSchema>): Position => ({
@@ -859,7 +630,7 @@ export class Portfolios {
       });
       if (hit)
         throw new PortfolioLocked(
-          `${hit} is supported by SnapTrade: link it under Settings ▸ Integrations ▸ SnapTrade instead of adding it by hand.`,
+          `${hit} is supported by SnapTrade: add it under Settings ▸ Brokers and accounts instead of adding it by hand.`,
         );
     }
     await this.store(v, id, nameKey, {

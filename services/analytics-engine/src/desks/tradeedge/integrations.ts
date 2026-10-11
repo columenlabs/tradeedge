@@ -118,7 +118,7 @@ export class Integrations {
     private readonly opts: {
       /** `https://edgedesk.app`: the webhook is a public route on the apex. */
       hookOrigin: string;
-      /** Where SnapTrade's portal returns: the app's Settings ▸ Integrations. */
+      /** Where SnapTrade's portal returns: the app's Settings ▸ Brokers and accounts. */
       portalReturn: string;
       /** EdgeDesk's market service: anyone without their own Alpaca key uses it. */
       market: MarketService;
@@ -199,7 +199,7 @@ export class Integrations {
   // ── status ──
 
   /**
-   * What Settings ▸ Integrations shows; brokers and accounts are read live from SnapTrade. `live`
+   * What Settings ▸ Integrations and Brokers and accounts show; brokers and accounts are read live from SnapTrade. `live`
    * false skips SnapTrade (the header's sync status reads only what is stored).
    */
   async status(owner: string, live = true) {
@@ -551,7 +551,7 @@ export function integrationRoutes(svc: Integrations) {
     if (c.get('identity')?.serviceToken || c.req.header('sec-fetch-site') !== 'same-origin')
       return c.json(
         {
-          error: 'Brokers are linked by a person in the app: Settings ▸ Integrations ▸ SnapTrade.',
+          error: 'Brokers are linked by a person in the app: Settings ▸ Brokers and accounts.',
         },
         403,
       );

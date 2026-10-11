@@ -79,13 +79,10 @@ const portfolioTransactions = createRoute({
 const portfolioTaxLots = createRoute({
   getParentRoute: () => root,
   path: '/portfolio/tax-lots',
+  // `?show=open|closed` opens it on those lots (the Realized YTD tile links to the closed ones).
+  validateSearch: (s: Record<string, unknown>): { show?: 'open' | 'closed' } =>
+    s.show === 'open' || s.show === 'closed' ? { show: s.show } : {},
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'TaxLotsPage'),
-});
-
-const portfolioClosedLots = createRoute({
-  getParentRoute: () => root,
-  path: '/portfolio/closed-lots',
-  component: lazyRouteComponent(() => import('@/routes/portfolio'), 'ClosedLotsPage'),
 });
 
 const portfolioView = createRoute({
@@ -116,7 +113,6 @@ const routeTree = root.addChildren([
   portfolio,
   portfolioTransactions,
   portfolioTaxLots,
-  portfolioClosedLots,
   portfolioView,
   logs,
   logView,

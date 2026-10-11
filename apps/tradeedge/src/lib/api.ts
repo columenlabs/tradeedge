@@ -228,8 +228,8 @@ export interface TaxLot {
   term: 'short' | 'long';
   /** Set when the cost is not the lot's own: yours, a transaction's price, the close that day, or none. */
   cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
-  /** snaptrade (the broker's, synced), derived (first in first out from trades) or manual (entered). */
-  source?: 'snaptrade' | 'derived' | 'manual';
+  /** Where the holding's lots come from: the broker (SnapTrade), entered (manual) or FIFO (derived). */
+  source: LotSource;
 }
 /** A lot, or part of one, a later trade closed; cost, proceeds and gain in USD, fees included. */
 export interface ClosedLot {
@@ -247,16 +247,17 @@ export interface ClosedLot {
   gain: number;
   term: 'short' | 'long';
 }
+export type LotSource = 'snaptrade' | 'derived' | 'manual';
 export interface Portfolio extends Omit<PortfolioSummary, 'positions'> {
   positions: Position[];
   lots: TaxLot[];
-  /** broker (SnapTrade), yours (entered for a manual account) or transactions (FIFO). */
-  lots_source: 'broker' | 'yours' | 'transactions';
   realized_ytd: { total: number; short_term: number };
   /** Every lot closed so far, FIFO from the buys and sells. */
   closed_lots: ClosedLot[];
   /** Holdings whose open lots miss the held quantity. */
-  checks: { symbol: string; held: number; in_lots: number }[];
+  checks: { symbol: string; held: number; in_lots: number; source: LotSource }[];
+  /** Dividends per symbol, in USD: every one on record and this year's. */
+  dividends: { symbol: string; total: number; ytd: number }[];
 }
 export interface Transaction {
   id: string;
@@ -305,13 +306,8 @@ export const allTransactionsQuery = () =>
 // ── Portfolio views (the shared custom view store): app views first, then the person's own ──
 
 /** The portfolio's view domains: holdings rows and transaction rows. */
-export type PortfolioDomain = 'holdings' | 'transactions' | 'tax_lots' | 'closed_lots';
-export const PORTFOLIO_DOMAINS: PortfolioDomain[] = [
-  'holdings',
-  'transactions',
-  'tax_lots',
-  'closed_lots',
-];
+export type PortfolioDomain = 'holdings' | 'transactions' | 'tax_lots';
+export const PORTFOLIO_DOMAINS: PortfolioDomain[] = ['holdings', 'transactions', 'tax_lots'];
 export type PortfolioView = CustomView & { domain: PortfolioDomain };
 
 export const portfolioViewsQuery = (domain: PortfolioDomain) =>
@@ -339,11 +335,9 @@ export const portfolioViewPath = (v: { app?: boolean; domain: string; id: string
   v.app
     ? v.domain === 'transactions'
       ? '/portfolio/transactions'
-      : v.domain === 'closed_lots'
-        ? '/portfolio/closed-lots'
-        : v.domain === 'tax_lots'
-          ? '/portfolio/tax-lots'
-          : '/portfolio'
+      : v.domain === 'tax_lots'
+        ? '/portfolio/tax-lots'
+        : '/portfolio'
     : `/portfolio/views/${v.domain}/${v.id}`;
 export const deletePortfolioView = (domain: PortfolioDomain, id: string) =>
   send<{ deleted: string }>('DELETE', `/api/v1/custom-views/${domain}/${enc(id)}`);

@@ -7,6 +7,7 @@
 import { ClickHouseError } from '@edgedesk/clickhouse';
 import { ProviderError } from '@edgedesk/providers';
 import type { Context, Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { getPath } from 'hono/utils/url';
 import { type AccessIdentity, AccessVerifier } from '../../access';
@@ -100,7 +101,7 @@ export function tradeedgeStores(
     portfolios,
     integrations: new Integrations(db, vault, portfolios, {
       hookOrigin: cfg.publicOrigin,
-      portalReturn: `${tradeOrigin(cfg)}/app/?settings=integrations`,
+      portalReturn: `${tradeOrigin(cfg)}/app/?settings=accounts`,
       market,
       logs,
       alpaca: {
@@ -294,9 +295,14 @@ export function tradeedgeRoutes(
   }
   const integrations = deps.integrations;
   if (integrations) {
-    app.post('/api/public/snaptrade-hook/:hookId', async (c) => {
+    // Open route: cap the body at 64 KB while it is read (Content-Length, or counted bytes when
+    // streamed), so an oversized request is refused before it is buffered or its signature checked.
+    const hookBodyLimit = bodyLimit({
+      maxSize: 64_000,
+      onError: (c) => c.json({ error: 'too large' }, 413),
+    });
+    app.post('/api/public/snaptrade-hook/:hookId', hookBodyLimit, async (c) => {
       const raw = await c.req.text();
-      if (raw.length > 64_000) return c.json({ error: 'too large' }, 413);
       const r = await integrations.hook(
         c.req.param('hookId'),
         raw,

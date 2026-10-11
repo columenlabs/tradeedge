@@ -345,17 +345,21 @@ function registerPortfolioTools(
       description:
         'One portfolio with every position. symbol is the ticker for stock and the OCC symbol for an ' +
         'option; quantity is shares or contracts, negative when short; avg_cost is per share in USD. ' +
-        'lots are the open tax lots; lots_source says where they come from: broker (synced from ' +
-        'SnapTrade), yours (portfolio_lot_write, manual accounts) or transactions (first-in first-out ' +
-        'from the buys and sells); each lot repeats it as source: snaptrade, manual or derived. A lot whose cost is not its own carries cost_from: yours ' +
+        'lots are the open tax lots. Each holding takes its lots from one source, named on every ' +
+        "lot as source: snaptrade (the broker's, synced), manual (portfolio_lot_write, manual " +
+        'accounts) or, when neither has lots for it, derived (first-in first-out from its buys and ' +
+        'sells). A lot is long or short as its holding is. A lot whose cost is not its own carries cost_from: yours ' +
         "(portfolio_lot_cost_write), transaction (that day's transaction price), estimate (the close on " +
         'the acquired day, because the broker sent 0: set the exact cost with portfolio_lot_cost_write) ' +
         'or missing (cost 0, no price found). A position the broker sent without avg_cost takes its ' +
         "lots' average (avg_cost_from lots). realized_ytd is this year's closed gain; closed_lots lists " +
         'every lot closed so far (first-in first-out from the buys and sells: acquired, closed, quantity, cost, ' +
         'proceeds, gain, term), the detail behind realized gains. checks lists holdings ' +
-        'whose lots do not add up to the held quantity: in a manual account, send the missing ' +
-        'transactions or lots; in a SnapTrade account, run integration_sync. A MARGIN-CASH position is the margin ' +
+        'whose lots do not add up to the held quantity (held, in_lots, and source, where their lots ' +
+        'come from); a stock sold out this year with more sold than bought on record shows as held 0 ' +
+        'and in_lots negative, its buy missing. dividends lists, per symbol, the dividends paid ' +
+        '(total on record, ytd this year). In a manual account, send the missing transactions (derived) or lots (manual); ' +
+        'in a SnapTrade account, run integration_sync. A MARGIN-CASH position is the margin ' +
         'borrowed in that account (quantity = minus the USD balance, priced at $1; see portfolio_write). ' +
         'Each position carries its sector (set ' +
         'with sector_write) and basket (set with basket_write), null when unset.',
@@ -501,7 +505,7 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
         'Store your own key for an integration, checked with the service first. snaptrade: your ' +
         'free SnapTrade Personal key, {provider: "snaptrade", client_id, consumer_key} (create it at ' +
         'dashboard.snaptrade.com after turning on two-factor sign-in). Brokers are then linked by a ' +
-        'person in the app (Settings > Integrations > SnapTrade > Add broker), never here. alpaca: ' +
+        'person in the app (Settings > Brokers and accounts > Add broker), never here. alpaca: ' +
         '{provider: "alpaca", key_id, secret_key}; live quotes and option chains then use your key ' +
         "instead of EdgeDesk's. Returns integration_list.",
       inputSchema: {

@@ -86,7 +86,6 @@ interface StTaxLot {
   quantity?: string | null;
   purchased_price?: string | null;
   cost_basis?: string | null;
-  position_type?: string | null;
 }
 interface StPosition {
   instrument: StInstrument;
@@ -311,10 +310,14 @@ export function mapPositions(results: StPosition[]) {
       const q = num(l.quantity);
       const price = num(l.purchased_price) ?? (q ? (num(l.cost_basis) ?? 0) / q : null);
       if (!q || price === null || !l.original_purchase_date) continue;
+      // Stored as a size: the lot takes its holding's side on read (`lots.ts`).
       lots.push({
         underlying: pos.underlying,
+        ...(pos.expiration
+          ? { expiration: pos.expiration, strike: pos.strike, right: pos.right }
+          : {}),
         acquired: l.original_purchase_date.slice(0, 10),
-        quantity: (l.position_type ?? '').toUpperCase() === 'SHORT' ? -Math.abs(q) : q,
+        quantity: Math.abs(q),
         cost: Math.abs(price),
       });
     }
