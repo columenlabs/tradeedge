@@ -1,0 +1,243 @@
+/* One theme for every desk (Bikram, 2026-10-08): Manrope + JetBrains Mono, the Authority palette,
+   compact density and the shell's frame spacing. Only the accent changes by desk (`data-desk` on
+   <html>): Data teal, Research violet, Trade blue. Gain and loss never change by desk.
+   An app imports this right after tailwindcss, then adds `@source` for this package and any
+   desk-local tokens of its own. */
+@import "@fontsource-variable/manrope";
+@import "@fontsource-variable/jetbrains-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: "Manrope Variable", Manrope, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-gain: var(--gain);
+  --color-edge: var(--edge);
+  --color-loss: var(--loss);
+  --color-warning: var(--warning);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+  --color-chart-9: var(--chart-9);
+  --color-chart-10: var(--chart-10);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* "Edge" in every app name (DataEdge, ResearchEdge, TradeEdge): one gold across the suite. */
+  --edge: #b8862e;
+  /* Frame: the shell owns these; pages never set their own outer padding or header. */
+  --shell-sidebar-width: 16rem;
+  --shell-header-height: 48px;
+  --shell-status-height: 32px;
+  --tile-width: 8.5rem;
+  --shell-gutter: 12px;
+  --shell-section-gap: 12px;
+  --shell-max-width: 1400px;
+  /* Compact density, the only density. */
+  --card-pad: 12px;
+  --row-h: 28px;
+  --cell-x: 8px;
+  --cell-y: 4px;
+
+  --background: #f4f6fa;
+  --foreground: #121826;
+  --card: #fbfcfe;
+  --card-foreground: #121826;
+  --popover: #fbfcfe;
+  --popover-foreground: #121826;
+  --primary: #2563eb;
+  --primary-foreground: #f5f8ff;
+  --secondary: #e9edf5;
+  --secondary-foreground: #121826;
+  --muted: #e9edf5;
+  --muted-foreground: #4f5970;
+  --accent: #e9edf5;
+  --accent-foreground: #121826;
+  --destructive: #c2183f;
+  --border: #d8deea;
+  --input: #c9d1e0;
+  /* Focus is quiet (Bikram, 2026-10-09): a neutral ring for keyboard focus, never the brand colour. */
+  --ring: var(--muted-foreground);
+  --radius: 0.5rem;
+  --chart-1: var(--primary);
+  --chart-2: #0e9f6e;
+  --chart-3: #d97706;
+  --chart-4: #7c3aed;
+  --chart-5: #db2777;
+  --chart-6: #0891b2;
+  --chart-7: #a16207;
+  --chart-8: #64748b;
+  --chart-9: #65a30d;
+  --chart-10: #dc2626;
+  --sidebar: #eef1f7;
+  --sidebar-foreground: #121826;
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: #dfe6f3;
+  --sidebar-accent-foreground: #121826;
+  --sidebar-border: #d8deea;
+  --sidebar-ring: var(--muted-foreground);
+  --gain: #00703c;
+  --loss: #c2183f;
+  /* A stage or check that needs a look (the Overview's amber). */
+  --warning: #9a5b06;
+  /* Key-date markers on charts (FOMC, CPI, Jobs), one hue each, drawn faint. */
+  --key-date-fomc: var(--chart-10);
+  --key-date-cpi: var(--chart-3);
+  --key-date-jobs: var(--chart-6);
+  color-scheme: light;
+}
+
+@media (min-width: 768px) {
+  :root {
+    --shell-gutter: 16px;
+  }
+}
+
+.dark {
+  --edge: #d4a24c;
+  --background: #0b0f17;
+  --foreground: #e6eaf2;
+  --card: #121826;
+  --card-foreground: #e6eaf2;
+  --popover: #121826;
+  --popover-foreground: #e6eaf2;
+  --primary: #5b8cff;
+  --primary-foreground: #0b0f17;
+  --secondary: #1c2435;
+  --secondary-foreground: #e6eaf2;
+  --muted: #1c2435;
+  --muted-foreground: #9aa4b8;
+  --accent: #1c2435;
+  --accent-foreground: #e6eaf2;
+  --destructive: #ff5c7a;
+  --border: #263046;
+  --input: #2f3a52;
+  --chart-2: #34d399;
+  --chart-3: #fbbf24;
+  --chart-4: #a78bfa;
+  --chart-5: #f472b6;
+  --chart-6: #22d3ee;
+  --chart-7: #f59e0b;
+  --chart-8: #94a3b8;
+  --chart-9: #a3e635;
+  --chart-10: #f87171;
+  --sidebar: #0f1420;
+  --sidebar-foreground: #e6eaf2;
+  --sidebar-accent: #1c2435;
+  --sidebar-accent-foreground: #e6eaf2;
+  --sidebar-border: #263046;
+  --gain: #34d399;
+  --loss: #ff5c7a;
+  --warning: #e5a73a;
+  color-scheme: dark;
+}
+
+/* Accent per desk. */
+:root[data-desk="data"] {
+  --primary: #0d9488;
+  --primary-foreground: #f0fdfa;
+}
+:root.dark[data-desk="data"] {
+  --primary: #2dd4bf;
+  --primary-foreground: #042f2e;
+}
+:root[data-desk="research"] {
+  --primary: #7c3aed;
+  --primary-foreground: #f5f3ff;
+}
+:root.dark[data-desk="research"] {
+  --primary: #a78bfa;
+  --primary-foreground: #1e1048;
+}
+:root[data-desk="trade"] {
+  --primary: #2563eb;
+  --primary-foreground: #f5f8ff;
+}
+:root.dark[data-desk="trade"] {
+  --primary: #5b8cff;
+  --primary-foreground: #0b0f17;
+}
+
+/* Glass surfaces, a user preference (Settings, All desks), off by default. */
+/* An app name's prefix (Data, Research, Trade) in that app's own accent, wherever it shows. */
+[data-desk-name="data"] {
+  color: #0d9488;
+}
+.dark [data-desk-name="data"] {
+  color: #2dd4bf;
+}
+[data-desk-name="research"] {
+  color: #7c3aed;
+}
+.dark [data-desk-name="research"] {
+  color: #a78bfa;
+}
+[data-desk-name="trade"] {
+  color: #2563eb;
+}
+.dark [data-desk-name="trade"] {
+  color: #5b8cff;
+}
+
+:root[data-glass="on"] [data-slot="card"],
+:root[data-glass="on"] [data-slot="shell-header"],
+:root[data-glass="on"] [data-slot="shell-status"] {
+  background-color: color-mix(in oklab, var(--card) 72%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}

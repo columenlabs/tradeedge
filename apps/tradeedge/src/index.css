@@ -1,0 +1,57 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@edgedesk/app-shell/theme.css";
+@source "../../../packages/ts/app-shell/src";
+
+/* TradeEdge's own tokens on top of the shared theme (fonts, palette, density and frame spacing
+   come from the shell). */
+@theme inline {
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-gain-tint: var(--gain-tint);
+  --color-loss-tint: var(--loss-tint);
+  --color-warn-tint: var(--warn-tint);
+  --color-accent-tint: var(--accent-tint);
+  --color-accent-text: var(--accent-text);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-strong: var(--input);
+}
+
+:root {
+  --warn: #8a5700;
+  --info: #1f5fbf;
+  --gain-tint: rgba(0, 112, 60, 0.1);
+  --loss-tint: rgba(194, 24, 63, 0.09);
+  --warn-tint: rgba(138, 87, 0, 0.1);
+  --accent-tint: rgba(37, 99, 235, 0.1);
+  --accent-text: #1d4ed8;
+  --ink-subtle: #5c6680;
+  --border-subtle: #d8deea;
+  --shadow-overlay: 0 12px 32px rgba(26, 26, 34, 0.12), 0 0 0 1px rgba(156, 151, 140, 0.5);
+}
+
+.dark {
+  --warn: #f2b53c;
+  --info: #6aa9ff;
+  --gain-tint: rgba(52, 211, 153, 0.1);
+  --loss-tint: rgba(255, 92, 122, 0.1);
+  --warn-tint: rgba(242, 181, 60, 0.12);
+  --accent-tint: rgba(91, 140, 255, 0.14);
+  --accent-text: #6aa9ff;
+  --ink-subtle: #8790a8;
+  --border-subtle: #263046;
+  --shadow-overlay: 0 12px 32px rgba(3, 3, 6, 0.55), 0 0 0 1px rgba(74, 76, 92, 0.6);
+}
+
+@layer base {
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0ms !important;
+      animation-duration: 0ms !important;
+    }
+  }
+}

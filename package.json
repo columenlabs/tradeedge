@@ -1,0 +1,23 @@
+{
+  "name": "tradeedge",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.1.38",
+  "workspaces": ["apps/*", "services/analytics-engine", "packages/ts/*"],
+  "scripts": {
+    "build": "bash scripts/assemble-trade-assets.sh",
+    "deploy": "cd services/analytics-engine && wrangler deploy"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.3.12",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=20"
+  }
+}

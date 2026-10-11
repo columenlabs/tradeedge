@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.wrangler/
+services/analytics-engine/public/
+.env
+.env.*
+.dev.vars

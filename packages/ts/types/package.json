@@ -1,0 +1,27 @@
+{
+  "name": "@edgedesk/types",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "lint": "biome check src",
+    "type-check": "tsc --noEmit"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./research": "./src/research.ts",
+    "./views": "./src/views.ts",
+    "./research-dates": "./src/research-dates.ts",
+    "./log-stamp": "./src/log-stamp.ts",
+    "./lab": "./src/lab.ts",
+    "./funds": "./src/funds.ts"
+  },
+  "dependencies": {
+    "jexl": "2.3.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/jexl": "2.3.4"
+  }
+}

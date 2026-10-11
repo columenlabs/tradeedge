@@ -1,0 +1,48 @@
+// TradeEdge alone, self-hosted (src/worker-trade.ts). Published as wrangler.jsonc in the public
+// columenlabs/tradeedge repo by scripts/export-tradeedge.sh; Appflare installs it from there.
+// No routes, no Secrets Store, no VPC: it answers on whatever host it is installed at.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "tradeedge",
+  "main": "src/worker-trade.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Builds the TradeEdge app into public/app/ before every deploy.
+  "build": { "command": "bash ../../scripts/assemble-trade-assets.sh" },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+
+  // Sign-in, origin and the Access audience are set per install (Appflare fills them in):
+  // PUBLIC_ORIGIN, TRADEEDGE_HOST, ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_APP_AUD.
+  // Secrets: VAULT_KEK (32 random bytes, base64), ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY.
+  "vars": {
+    // prod refuses every signed-in route until the Access values are set.
+    "EDGEDESK_ENV": "prod",
+    "ALPACA_OPTIONS_FEED": "indicative",
+    "ALPACA_STOCK_FEED": "iex",
+    "ALPACA_TRADING_URL": "https://paper-api.alpaca.markets",
+    "LIVE_CACHE_TTL_MS": "2000"
+  },
+
+  // Every person's data, sealed with VAULT_KEK. Created on the first deploy.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "tradeedge", "migrations_dir": "migrations" }
+  ],
+
+  // Per-identity limits (key = Access subject, else client IP). Protects the live-data quota.
+  "ratelimits": [
+    {
+      "name": "API_RATE_LIMITER",
+      "namespace_id": "1101",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    { "name": "MCP_RATE_LIMITER", "namespace_id": "1102", "simple": { "limit": 60, "period": 60 } }
+  ]
+}

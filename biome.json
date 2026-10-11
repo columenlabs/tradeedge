@@ -1,0 +1,47 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "ignore": [
+      "node_modules",
+      "dist",
+      ".next",
+      ".output",
+      ".turbo",
+      "build",
+      "coverage",
+      "**/*.md",
+      "**/routeTree.gen.ts",
+      "**/tradeedge/src/components/ui/**",
+      "**/researchedge/src/components/ui/**",
+      "**/dataedge/src/components/ui/**",
+      "**/app-shell/src/ui/**"
+    ]
+  },
+  "organizeImports": { "enabled": true },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "style": {
+        "noNonNullAssertion": "warn"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  }
+}

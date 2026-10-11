@@ -1,0 +1,15 @@
+{
+  "name": "@edgedesk/clickhouse",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "lint": "biome check src",
+    "type-check": "tsc --noEmit",
+    "test": "../../../scripts/bun-test.sh"
+  },
+  "dependencies": {
+    "@edgedesk/types": "workspace:*"
+  }
+}

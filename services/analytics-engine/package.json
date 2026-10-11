@@ -1,0 +1,34 @@
+{
+  "name": "@edgedesk/analytics-engine",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun --minify",
+    "lint": "biome check src",
+    "type-check": "tsc --noEmit",
+    "test": "../../scripts/bun-test.sh",
+    "assets": "../../scripts/assemble-assets.sh",
+    "dev:worker": "wrangler dev",
+    "deploy": "bun run assets && wrangler deploy",
+    "deploy:check": "wrangler deploy --dry-run --outdir .wrangler/dry-run"
+  },
+  "dependencies": {
+    "@edgedesk/clickhouse": "workspace:*",
+    "@edgedesk/providers": "workspace:*",
+    "@edgedesk/strategies": "workspace:*",
+    "@edgedesk/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@octokit/app": "^16.1.4",
+    "@octokit/core": "^7.0.8",
+    "hono": "^4.6.14",
+    "jose": "^6.2.12",
+    "jsep": "^1.4.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "wrangler": "^4.138.0"
+  }
+}
