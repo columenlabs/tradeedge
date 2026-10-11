@@ -184,7 +184,9 @@ function SnapTradeConnect() {
         <li className="grid grid-cols-1 gap-2">
           <p>
             <span className="font-medium">1. Get a key.</span> Sign in at SnapTrade, turn on
-            two-factor sign-in, and create a Personal key. It's free and covers up to 5 brokers.
+            two-factor sign-in, and create a Personal key. It's free, covers up to 5 brokers and
+            includes tax lots for eligible brokers. Some brokers can also place trades for you;
+            trading in TradeEdge is still in progress.
           </p>
           <Button size="sm" variant="outline" className="justify-self-start" asChild>
             <a href={SNAPTRADE_DASHBOARD} target="_blank" rel="noreferrer">

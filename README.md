@@ -17,7 +17,7 @@ You need:
 
 - A Cloudflare account (the Workers free plan is enough) with a Zero Trust organization, for sign-in.
 - A free [Alpaca](https://alpaca.markets) API key, for live quotes and option chains.
-- Optional: a free [SnapTrade](https://snaptrade.com) Personal key, to sync your broker accounts. Add it in the app under Settings ▸ Integrations.
+- Optional: a [SnapTrade](https://snaptrade.com) Personal key, to sync your broker accounts. It's free, covers up to 5 brokers and includes tax lots for eligible brokers. Some brokers can also place trades for you; trading in TradeEdge is still in progress. Add the key in the app under Settings ▸ Integrations.
 
 ## What a self-hosted copy has
 
@@ -27,7 +27,7 @@ You need:
 | Sign-in | Cloudflare Access, in front of the whole app |
 | Your data | in your own D1 database, every person's rows encrypted with your `VAULT_KEK` |
 | Live quotes and chains | your Alpaca key |
-| Broker holdings | your SnapTrade Personal key |
+| Broker holdings and tax lots | your SnapTrade Personal key (free, up to 5 brokers; tax lots for eligible brokers) |
 | Historical option chains | no (`/api/v1/history/*` answers 503) |
 
 ## Deploy by hand
