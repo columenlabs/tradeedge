@@ -11,6 +11,7 @@ import {
   coverageQuery,
   expirationsQuery,
   fundNavsQuery,
+  rawClosesQuery,
   snapshotDatesQuery,
   underlyingsQuery,
 } from './queries';
@@ -52,6 +53,25 @@ export class HistoryStore {
   async chain(p: ChainQueryParams): Promise<{ quotes: OptionQuote[]; spot: number | null }> {
     const rows = await this.ch.query(chainQuery(p, this.ch.database));
     return { quotes: normalizeOptionRows(rows), spot: underlyingLast(rows) };
+  }
+
+  /** Unadjusted daily closes per symbol between two days (YYYY-MM-DD), oldest first. */
+  async rawCloses(
+    symbols: string[],
+    from: string,
+    to: string,
+  ): Promise<Record<string, { date: string; close: number }[]>> {
+    if (symbols.length === 0) return {};
+    const rows = await this.ch.query<{ symbol: string; date: string; close: unknown }>(
+      rawClosesQuery(symbols, from, to, this.ch.database),
+    );
+    const out: Record<string, { date: string; close: number }[]> = {};
+    for (const r of rows) {
+      const list = out[r.symbol] ?? [];
+      list.push({ date: r.date, close: n(r.close) });
+      out[r.symbol] = list;
+    }
+    return out;
   }
 
   /** Latest NAV of each fund that has one, as a quote: change is against the NAV before it. */

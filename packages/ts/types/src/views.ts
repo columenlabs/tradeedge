@@ -309,6 +309,21 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
     }),
   },
   {
+    id: 'tax-lots',
+    app: true,
+    desk: 'trade',
+    domain: 'tax_lots',
+    owner: null,
+    name: 'Tax lots',
+    config: customViewConfigSchema.parse({
+      shape: 'group',
+      columns: ['account', 'source', 'acquired', 'quantity', 'cost', 'cost_basis', 'term'],
+      icon: 'layers',
+      group: { fields: ['underlying', 'account', 'source', 'term'], default: 'underlying' },
+      filters: { fields: ['source', 'account', 'underlying', 'term'], default: [] },
+    }),
+  },
+  {
     id: 'closed-lots',
     app: true,
     desk: 'trade',
@@ -323,6 +338,22 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
       widgets: ['realized_ytd', 'realized_all'],
       group: { fields: ['account', 'underlying', 'year', 'term'], default: 'year' },
       filters: { fields: ['term', 'account', 'underlying'], default: [] },
+    }),
+  },
+  {
+    id: 'logs',
+    app: true,
+    desk: 'trade',
+    domain: 'logs',
+    owner: null,
+    name: 'Logs',
+    config: customViewConfigSchema.parse({
+      shape: 'table',
+      columns: ['at', 'category', 'what', 'outcome', 'ms', 'detail'],
+      chips: [{ key: 'category', placement: 'column' }],
+      icon: 'clock',
+      group: { fields: ['category', 'outcome', 'what'], default: null },
+      filters: { fields: ['category', 'outcome', 'what'], default: [] },
     }),
   },
 ];
@@ -382,6 +413,22 @@ export const customViewFields: Record<
     group: ['action', 'underlying', 'account'],
     filter: ['action', 'instrument', 'underlying', 'account'],
   },
+  tax_lots: {
+    columns: [
+      'symbol',
+      'underlying',
+      'acquired',
+      'quantity',
+      'cost',
+      'cost_basis',
+      'term',
+      'source',
+      'account',
+      'tax_type',
+    ],
+    group: ['underlying', 'source', 'term', 'account', 'tax_type'],
+    filter: ['symbol', 'underlying', 'source', 'term', 'account', 'tax_type'],
+  },
   closed_lots: {
     columns: [
       'instrument',
@@ -401,6 +448,11 @@ export const customViewFields: Record<
     group: ['underlying', 'year', 'term', 'account', 'tax_type'],
     filter: ['instrument', 'underlying', 'year', 'term', 'account', 'tax_type'],
     widgets: ['realized_ytd', 'realized_all'],
+  },
+  logs: {
+    columns: ['at', 'category', 'what', 'outcome', 'ms', 'detail'],
+    group: ['category', 'outcome', 'what'],
+    filter: ['category', 'outcome', 'what'],
   },
 };
 

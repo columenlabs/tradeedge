@@ -32,15 +32,7 @@ import {
   TableIcon,
   XIcon,
 } from 'lucide-react';
-import {
-  Fragment,
-  type ReactNode,
-  type RefObject,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useIsMobile } from './hooks/use-mobile';
 import { cn } from './lib/utils';
 import { type Crumb, Page } from './page';
@@ -174,42 +166,16 @@ function FirstCell({
 
 /** The row styling every Total and group header shares. */
 const ROLLUP = 'bg-muted/50 font-medium hover:bg-muted/50';
-// The page's table scrolls in its own box, one screen tall (less the page header, status bar and bottom gutter), so its header and group rows stay
-// pinned with native sticky while the rows scroll (Bikram, 2026-10-09; the shadcn sticky-header
-// data table pattern). Group rows sit right under the header, overlapping it by 1px so no gap
-// ever shows; the next group row slides over the one pinned.
-// The page scrolls first: the box scrolls its rows only once it is docked under the page header,
-// so the tiles and filter leave the screen before the rows move, and come back only after the
-// rows are back at their top (Bikram, 2026-10-09).
-const SCROLL_BOX =
-  'max-h-[calc(100svh-var(--shell-header-height)-var(--shell-status-height)-var(--shell-gutter))] overflow-x-auto overflow-y-hidden data-docked:overflow-y-auto [&>[data-slot=table-container]]:overflow-visible';
-
-/** Marks the box `data-docked` while its top sits at the page header (the page scrolled it there). */
-function useDocked(ref: RefObject<HTMLDivElement | null>, on = true) {
-  useEffect(() => {
-    const box = ref.current;
-    if (!box || !on) return;
-    const check = () => {
-      const head = Number.parseFloat(
-        getComputedStyle(box).getPropertyValue('--shell-header-height'),
-      );
-      const docked = box.getBoundingClientRect().top <= (Number.isNaN(head) ? 0 : head) + 1;
-      if (docked === box.hasAttribute('data-docked')) return;
-      if (docked) box.setAttribute('data-docked', '');
-      else {
-        box.removeAttribute('data-docked');
-        box.scrollTop = 0;
-      }
-    };
-    check();
-    window.addEventListener('scroll', check, { passive: true });
-    window.addEventListener('resize', check);
-    return () => {
-      window.removeEventListener('scroll', check);
-      window.removeEventListener('resize', check);
-    };
-  }, [ref, on]);
-}
+// One scroller for the whole view (Bikram, 2026-10-11): the tiles, filter and table scroll together
+// in one box, one screen tall, so a swipe never stalls where the header pins and the tiles leave the
+// screen before the rows move. The header and group rows pin with native sticky inside it (the shadcn
+// sticky-header data table pattern); group rows sit right under the header, overlapping it by 1px so
+// no gap ever shows, and the next group row slides over the one pinned. Wide tables scroll sideways
+// in the same box while the tiles and filter stay put.
+const VIEW_SCROLL =
+  '@container max-h-[calc(100svh-var(--shell-header-height)-var(--shell-status-height)-2*var(--shell-gutter))] overflow-auto';
+/** The table inside the view's scroller: it never scrolls on its own, so sticky rows pin to the view. */
+const IN_VIEW = '[&>[data-slot=table-container]]:overflow-visible';
 const PINNED_HEAD = 'sticky top-0 z-20 bg-card shadow-[inset_0_-1px_0_var(--color-border)]';
 const PINNED_GROUP =
   'sticky top-[calc(var(--row-h)-1px)] z-10 bg-[color-mix(in_oklab,var(--color-muted)_50%,var(--color-card))] shadow-[inset_0_1px_0_var(--color-border),inset_0_-1px_0_var(--color-border)]';
@@ -540,8 +506,11 @@ export function CustomViewPage<T extends RowData>({
       }
     >
       {(() => {
-        const main = (
-          <>
+        const top = (intro ||
+          (widget && config.widgets.length > 0) ||
+          tiles.length > 0 ||
+          header) && (
+          <div className="sticky left-0 flex w-[100cqw] flex-col gap-(--shell-section-gap)">
             {intro}
             {((widget && config.widgets.length > 0) || tiles.length > 0) && (
               <div
@@ -562,25 +531,32 @@ export function CustomViewPage<T extends RowData>({
               </div>
             )}
             {header}
-            <Card className="gap-0 overflow-hidden py-0">
-              {state ??
-                (mode === GROUP_PIVOT && config.pivot ? (
-                  <PivotTable domain={domain} rows={filter.results} pivot={config.pivot} />
-                ) : (
-                  <RowsTable
-                    domain={domain}
-                    columns={columns}
-                    rows={mergeRows(domain, filter.results, groupField)}
-                    groupBy={groupField}
-                    chips={chips}
-                    paged
-                    onDetails={onOpen ?? (domain.details?.length ? setDetails : undefined)}
-                    selection={selection}
-                    groupActions={groupActions}
-                  />
-                ))}
-            </Card>
-          </>
+          </div>
+        );
+        const main = (
+          <div data-slot="view-scroll" className={VIEW_SCROLL}>
+            <div className="flex w-max min-w-full flex-col gap-(--shell-section-gap)">
+              {top}
+              <Card className="gap-0 overflow-clip py-0">
+                {state ??
+                  (mode === GROUP_PIVOT && config.pivot ? (
+                    <PivotTable domain={domain} rows={filter.results} pivot={config.pivot} />
+                  ) : (
+                    <RowsTable
+                      domain={domain}
+                      columns={columns}
+                      rows={mergeRows(domain, filter.results, groupField)}
+                      groupBy={groupField}
+                      chips={chips}
+                      paged
+                      onDetails={onOpen ?? (domain.details?.length ? setDetails : undefined)}
+                      selection={selection}
+                      groupActions={groupActions}
+                    />
+                  ))}
+              </Card>
+            </div>
+          </div>
         );
         const title = details === null ? '' : (rowTitle?.(details) ?? domain.rowKey(details));
         return (
@@ -656,8 +632,6 @@ function RowsTable<T extends RowData>({
     pageSize: paging ? PAGE_SIZE : Math.max(rows.length, 1),
   };
   const [closed, setClosed] = useState<Set<string>>(new Set());
-  const box = useRef<HTMLDivElement>(null);
-  useDocked(box, paged);
   // The grouped field is the group row's label, so its column hides (Bikram, 2026-10-08).
   const visible = columns.filter((f) => f.key !== groupBy?.key);
   // Inline chips sit on the first column, next to the row's name, not in their own (Bikram,
@@ -843,7 +817,7 @@ function RowsTable<T extends RowData>({
   );
 
   return (
-    <div ref={box} className={paged ? SCROLL_BOX : 'overflow-x-auto'}>
+    <div className={paged ? IN_VIEW : 'overflow-x-auto'}>
       <Table>
         <TableHeader>
           {table.getHeaderGroups().map((hg) => (
@@ -1037,8 +1011,6 @@ function PivotTable<T>({
   rows: T[];
   pivot: NonNullable<CustomViewConfig['pivot']>;
 }) {
-  const box = useRef<HTMLDivElement>(null);
-  useDocked(box);
   const field = (k: string) => domain.fields.find((f) => f.key === k);
   const rf = field(pivot.rows);
   const cf = field(pivot.columns);
@@ -1071,7 +1043,7 @@ function PivotTable<T>({
   const fmt: ViewFormat = pivot.agg === 'count' ? 'integer' : vf.format;
   const amount = pivot.agg !== 'count' && vf.amount;
   return (
-    <div ref={box} className={SCROLL_BOX} data-testid="view-pivot">
+    <div className={IN_VIEW} data-testid="view-pivot">
       <Table>
         <TableHeader>
           <TableRow>

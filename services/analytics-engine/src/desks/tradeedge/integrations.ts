@@ -15,6 +15,7 @@ import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
 import { MarketService } from '../../market';
 import { type Vault, withRetry } from '../../vault';
+import type { Logs } from './logs';
 import { type Portfolios, type TaxType, portfolioOwner } from './portfolio';
 import {
   SnapTradeClient,
@@ -104,6 +105,8 @@ const SYNC_EVENTS = new Set([
 /** Transactions are re-read this far back on each sync, to pick up the broker's late corrections. */
 const OVERLAP_DAYS = 30;
 const MAX_ACTIVITY_PAGES = 20;
+/** Accounts synced at the same time. */
+const SYNC_PARALLEL = 6;
 
 export class Integrations {
   private readonly markets = new Map<string, { at: number; market: MarketService }>();
@@ -121,6 +124,8 @@ export class Integrations {
       market: MarketService;
       /** Feeds and URLs for a person's own Alpaca key (EdgeDesk's settings, without its key). */
       alpaca: Omit<AlpacaConfig, 'keyId' | 'secretKey'>;
+      /** Each person's Logs: SnapTrade syncs, webhook events and key changes. */
+      logs?: Logs;
       fetch?: FetchFn;
     },
   ) {}
@@ -321,6 +326,7 @@ export class Integrations {
 
   /** Pulls every included account (or one) from SnapTrade into Holdings. */
   async sync(owner: string, only?: string): Promise<SyncReport> {
+    const t0 = performance.now();
     const doc = await this.snaptrade(owner);
     const client = this.client(doc);
     const report: SyncReport = {
@@ -343,24 +349,29 @@ export class Integrations {
             .toISOString()
             .slice(0, 10)
         : undefined;
-      for (const a of accounts) {
-        if (skip.has(a.id) || (only && a.id !== only)) continue;
-        try {
-          const r = await this.syncAccount(
-            client,
-            owner,
-            a,
-            synced.has(a.id) ? since : undefined,
-            synced.get(a.id)?.tax_type,
-          );
-          report.accounts++;
-          report.positions += r.positions;
-          report.transactions += r.transactions;
-          report.skipped.push(...r.skipped);
-        } catch (err) {
-          report.errors.push(`${accountName(a)}: ${(err as Error).message}`);
+      // Several accounts at once: a webhook's sync runs after the reply, where the Worker allows about
+      // 30 s, and 21 accounts one by one did not finish in that time.
+      const queue = accounts.filter((a) => !skip.has(a.id) && (!only || a.id === only));
+      const worker = async () => {
+        for (let a = queue.shift(); a; a = queue.shift()) {
+          try {
+            const r = await this.syncAccount(
+              client,
+              owner,
+              a,
+              synced.has(a.id) ? since : undefined,
+              synced.get(a.id)?.tax_type,
+            );
+            report.accounts++;
+            report.positions += r.positions;
+            report.transactions += r.transactions;
+            report.skipped.push(...r.skipped);
+          } catch (err) {
+            report.errors.push(`${accountName(a)}: ${(err as Error).message}`);
+          }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: SYNC_PARALLEL }, worker));
     } catch (err) {
       report.errors.push((err as Error).message);
     }
@@ -370,6 +381,15 @@ export class Integrations {
         prev ? { ...prev, last_sync: report } : prev,
       );
     }
+    await this.opts.logs?.note(owner, {
+      category: 'snaptrade',
+      what:
+        `Sync${only ? ' (one account)' : ''}: ${report.accounts} accounts, ${report.positions} ` +
+        `positions, ${report.transactions} transactions`,
+      ok: report.ok,
+      ms: performance.now() - t0,
+      detail: report.errors.length ? report.errors.join('; ') : undefined,
+    });
     return report;
   }
 
@@ -427,6 +447,12 @@ export class Integrations {
     await this.update(row.owner, 'snaptrade', (prev) =>
       prev ? { ...prev, last_event: { at: new Date().toISOString(), type } } : prev,
     );
+    await this.opts.logs?.note(row.owner, {
+      category: 'snaptrade',
+      what: `Webhook: ${type}`,
+      ok: true,
+      detail: SYNC_EVENTS.has(type) ? 'Re-sync started' : undefined,
+    });
     return {
       status: 200,
       work: SYNC_EVENTS.has(type) ? this.sync(row.owner, event.accountId || undefined) : undefined,

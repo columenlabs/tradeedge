@@ -116,6 +116,16 @@ export class HistoryService {
     return this.store ? this.store.fundNavs(symbols) : Promise.resolve({});
   }
 
+  /** Unadjusted daily closes (lot costs the broker left at 0). Not cached, like fundNavs. Empty when
+   *  history is off. */
+  rawCloses(
+    symbols: string[],
+    from: string,
+    to: string,
+  ): Promise<Record<string, { date: string; close: number }[]>> {
+    return this.store ? this.store.rawCloses(symbols, from, to) : Promise.resolve({});
+  }
+
   coverage(): Promise<HistoryCoverage[]> {
     return this.cached('coverage', () => this.s().coverage());
   }

@@ -17,7 +17,7 @@ You need:
 
 - A Cloudflare account (the Workers free plan is enough) with a Zero Trust organization, for sign-in.
 - A free [Alpaca](https://alpaca.markets) API key, for live quotes and option chains.
-- Optional: a [SnapTrade](https://snaptrade.com) Personal key, to sync your broker accounts. It's free, covers up to 5 brokers and includes tax lots for eligible brokers. Some brokers can also place trades for you; trading in TradeEdge is still in progress. Add the key in the app under Settings ▸ Integrations.
+- Optional: a [SnapTrade](https://snaptrade.com) Personal key, to sync your broker accounts. It's free, covers up to 5 brokers and includes tax lots for eligible brokers. Placing trades through SnapTrade, for eligible accounts, is in progress and coming soon. Add the key in the app under Settings ▸ Integrations.
 
 ## What a self-hosted copy has
 

@@ -15,6 +15,7 @@ import {
 } from './desks/tradeedge/integrations';
 import {
   type Portfolios,
+  lotCostWriteShape,
   lotWriteShape,
   portfolioIdSchema,
   portfolioOwner,
@@ -346,7 +347,11 @@ function registerPortfolioTools(
         'option; quantity is shares or contracts, negative when short; avg_cost is per share in USD. ' +
         'lots are the open tax lots; lots_source says where they come from: broker (synced from ' +
         'SnapTrade), yours (portfolio_lot_write, manual accounts) or transactions (first-in first-out ' +
-        "from the buys and sells). realized_ytd is this year's closed gain; closed_lots lists " +
+        'from the buys and sells); each lot repeats it as source: snaptrade, manual or derived. A lot whose cost is not its own carries cost_from: yours ' +
+        "(portfolio_lot_cost_write), transaction (that day's transaction price), estimate (the close on " +
+        'the acquired day, because the broker sent 0: set the exact cost with portfolio_lot_cost_write) ' +
+        'or missing (cost 0, no price found). A position the broker sent without avg_cost takes its ' +
+        "lots' average (avg_cost_from lots). realized_ytd is this year's closed gain; closed_lots lists " +
         'every lot closed so far (first-in first-out from the buys and sells: acquired, closed, quantity, cost, ' +
         'proceeds, gain, term), the detail behind realized gains. checks lists holdings ' +
         'whose lots do not add up to the held quantity: in a manual account, send the missing ' +
@@ -437,6 +442,23 @@ function registerPortfolioTools(
       inputSchema: lotWriteShape,
     },
     async ({ portfolio_id, lots }) => json(await portfolios.writeLots(owner, portfolio_id, lots)),
+  );
+  server.registerTool(
+    'portfolio_lot_cost_write',
+    {
+      title: 'Set a lot cost',
+      description:
+        "Any account, SnapTrade's too: set the exact cost per share of one stock's lots acquired on " +
+        'one day. Use it where portfolio_read shows a lot with cost_from estimate (the close that day, ' +
+        'because the broker sent cost 0, as brokers often do for RSU, ESPP or transferred-in shares) ' +
+        'or missing (no cost at all). For RSUs the cost is the value per share on the vest day, on the ' +
+        "employer's stock plan statement or W-2. quantity picks one lot when several share a day; " +
+        'cost null clears yours. It outranks the broker and survives syncs. Example: ' +
+        '{portfolio_id, underlying: "AMZN", acquired: "2025-05-21", cost: 201.12}. Returns the ' +
+        'account as portfolio_read does.',
+      inputSchema: lotCostWriteShape,
+    },
+    async (input) => json(await portfolios.writeLotCost(owner, input)),
   );
   server.registerTool(
     'portfolio_delete',

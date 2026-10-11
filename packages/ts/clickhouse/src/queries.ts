@@ -172,3 +172,27 @@ export function fundNavsQuery(symbols: string[], database = DEFAULT_DATABASE): Q
     params: { symbols: symbols.join(',') },
   };
 }
+
+/**
+ * Unadjusted daily closes of `symbols` (comma-separated tickers) from `from` to `to` (YYYY-MM-DD),
+ * from `stock_bars_1d_raw` (homelab-pipelines): what a share traded at that day, as a broker
+ * values a lot received then.
+ */
+export function rawClosesQuery(
+  symbols: string[],
+  from: string,
+  to: string,
+  database = DEFAULT_DATABASE,
+): Query {
+  if (!IDENT_RE.test(database)) throw new Error(`invalid database: ${database}`);
+  return {
+    sql: [
+      'SELECT symbol, toString(trading_date) AS date, close',
+      `FROM ${database}.stock_bars_1d_raw FINAL`,
+      "WHERE symbol IN (SELECT arrayJoin(splitByChar(',', {symbols:String})))",
+      'AND trading_date BETWEEN {from:Date} AND {to:Date} AND close > 0',
+      'ORDER BY symbol, trading_date',
+    ].join(' '),
+    params: { symbols: symbols.join(','), from, to },
+  };
+}

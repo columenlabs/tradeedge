@@ -2,7 +2,14 @@
 // switcher top-left, the desk's own nav, the profile bottom-left; collapses to icons on desktop and
 // becomes a drawer on phone. A desk passes its id, nav and status items; pages render in `Page`.
 import { useRouterState } from '@tanstack/react-router';
-import { CheckIcon, ChevronsUpDownIcon, LogOutIcon, SettingsIcon, SunMoonIcon } from 'lucide-react';
+import {
+  CheckIcon,
+  ChevronsUpDownIcon,
+  LogOutIcon,
+  ScrollTextIcon,
+  SettingsIcon,
+  SunMoonIcon,
+} from 'lucide-react';
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { type Desk, type DeskId, appsHere, deskOf } from './desks';
 import { SIGN_OUT_URL, firstName, initials, useIdentity } from './identity';
@@ -156,7 +163,7 @@ function ThemeItem() {
   );
 }
 
-function NavUser({ onSettings }: { onSettings: () => void }) {
+function NavUser({ onSettings, onLogs }: { onSettings: () => void; onLogs?: () => void }) {
   const { isMobile } = useSidebar();
   const who = useIdentity();
   const person = (
@@ -197,6 +204,12 @@ function NavUser({ onSettings }: { onSettings: () => void }) {
                 Settings
                 <DropdownMenuShortcut>{SETTINGS_KEYS}</DropdownMenuShortcut>
               </DropdownMenuItem>
+              {onLogs ? (
+                <DropdownMenuItem onSelect={onLogs}>
+                  <ScrollTextIcon />
+                  Logs
+                </DropdownMenuItem>
+              ) : null}
               <ThemeItem />
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
@@ -225,6 +238,8 @@ export interface AppShellProps {
   onRefresh?: () => Promise<unknown>;
   /** Shows Hide amounts (eye) in the header: masks the fields and values the desk marks `amount`. */
   hideAmounts?: boolean;
+  /** Opens the desk's Logs page; shows Logs in the profile menu (Bikram, 2026-10-11). */
+  onLogs?: () => void;
   /** The routed page (usually `<Outlet />`). */
   children: ReactNode;
 }
@@ -249,6 +264,7 @@ export function AppShell({
   settings,
   onRefresh,
   hideAmounts = false,
+  onLogs,
   children,
 }: AppShellProps) {
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null);
@@ -296,7 +312,7 @@ export function AppShell({
             </SidebarHeader>
             <SidebarContent>{nav}</SidebarContent>
             <SidebarFooter>
-              <NavUser onSettings={() => openSettings()} />
+              <NavUser onSettings={() => openSettings()} onLogs={onLogs} />
             </SidebarFooter>
             <SidebarRail />
           </Sidebar>

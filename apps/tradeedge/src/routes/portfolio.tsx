@@ -1,4 +1,5 @@
 import { Tile } from '@/components/ticker';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -18,6 +19,7 @@ import {
   type PortfolioView,
   type Position,
   type TagSet,
+  type TaxLot,
   type Transaction,
   allTransactionsQuery,
   deletePortfolioView,
@@ -409,6 +411,12 @@ const HOLDINGS_BASE: ViewDomain<Holding> = {
       render: (h) => <LotDetails holding={h} />,
     },
     {
+      id: 'closed_lots',
+      label: 'Closed lots',
+      icon: CircleDollarSign,
+      render: (h) => <ClosedLotDetails holding={h} />,
+    },
+    {
       id: 'transactions',
       label: 'Transactions',
       icon: ArrowLeftRight,
@@ -592,6 +600,128 @@ const TRANSACTIONS: ViewDomain<Activity> = {
   ],
 };
 
+interface LotRow extends TaxLot {
+  key: string;
+  account: Portfolio;
+}
+
+/** A lot's source as its chip says it (Bikram, 2026-10-11). */
+const SOURCE = { snaptrade: 'SnapTrade', derived: 'Derived', manual: 'Manual' } as const;
+const sourceTip = (l: TaxLot) =>
+  l.source === 'snaptrade'
+    ? "The broker's own lot, synced from SnapTrade (its Tax lots add-on)."
+    : l.source === 'manual'
+      ? 'Entered for this manual account (in the app, or by an agent with portfolio_lot_write).'
+      : "Worked out first in first out from this account's buys and sells, because SnapTrade sent no lots for it. Transfers in or out are not counted, so it can differ from the broker's lots. Broker lots replace it once SnapTrade's Tax lots add-on sends them.";
+
+/** The source chip with its tooltip. */
+function SourceChip({ lot }: { lot: TaxLot }) {
+  return <CostChip label={SOURCE[lot.source ?? 'derived']} tip={sourceTip(lot)} />;
+}
+
+/** Tax lots (Bikram, 2026-10-11): every open lot of every account, each with its source. */
+const TAX_LOTS: ViewDomain<LotRow> = {
+  id: 'tax_lots',
+  formulas: true,
+  rowKey: (l) => l.key,
+  text: (l) => [l.symbol, l.account.name],
+  fields: [
+    {
+      key: 'symbol',
+      label: 'Symbol',
+      icon: Tag,
+      value: (l) => l.symbol,
+      format: 'text',
+      filterable: true,
+    },
+    {
+      key: 'underlying',
+      label: 'Underlying',
+      icon: Layers,
+      value: (l) => l.symbol.replace(/\d{6}[CP]\d{8}$/, '').trim(),
+      format: 'text',
+      filterable: true,
+      groupable: true,
+    },
+    {
+      key: 'acquired',
+      label: 'Acquired',
+      icon: CalendarDays,
+      value: (l) => l.acquired,
+      format: 'text',
+      formula: 'trade date the lot was bought (or sold short)',
+    },
+    {
+      key: 'quantity',
+      label: 'Qty',
+      icon: Hash,
+      value: (l) => l.quantity,
+      format: 'number',
+      amount: true,
+      formula: 'shares or contracts still open, negative for a short lot',
+      aggregate: 'sum',
+    },
+    {
+      key: 'cost',
+      label: 'Cost',
+      icon: Banknote,
+      value: (l) => l.cost,
+      format: 'price',
+      formula: 'per share, fees included',
+      render: (l) => <LotCost lot={l} />,
+    },
+    {
+      key: 'cost_basis',
+      label: 'Cost basis',
+      icon: Banknote,
+      value: (l) => l.cost * l.quantity,
+      format: 'price',
+      amount: true,
+      formula: 'cost × qty',
+      aggregate: 'sum',
+    },
+    {
+      key: 'term',
+      label: 'Term',
+      icon: Hash,
+      value: (l) => (l.account.tax_type === 'retirement' ? 'n/a' : TERM[l.term]),
+      format: 'text',
+      formula: 'Long when held more than a year; n/a in a retirement account',
+      filterable: true,
+      groupable: true,
+    },
+    {
+      key: 'source',
+      label: 'Source',
+      icon: Layers,
+      value: (l) => SOURCE[l.source ?? 'derived'],
+      format: 'text',
+      formula: "SnapTrade (the broker's lot), Derived (first in first out from trades) or Manual",
+      filterable: true,
+      groupable: true,
+      render: (l) => <SourceChip lot={l} />,
+    },
+    {
+      key: 'account',
+      label: 'Account',
+      icon: Briefcase,
+      value: (l) => l.account.name,
+      format: 'text',
+      filterable: true,
+      groupable: true,
+    },
+    {
+      key: 'tax_type',
+      label: 'Tax type',
+      icon: Landmark,
+      value: (l) => taxLabel(l.account),
+      format: 'text',
+      filterable: true,
+      groupable: true,
+    },
+  ],
+};
+
 interface ClosedRow extends ClosedLot {
   key: string;
   account: Portfolio;
@@ -630,7 +760,7 @@ const CLOSED_LOTS: ViewDomain<ClosedRow> = {
     },
     {
       key: 'acquired',
-      label: 'Opened',
+      label: 'Acquired',
       icon: CalendarDays,
       value: (l) => l.acquired,
       format: 'text',
@@ -1048,6 +1178,13 @@ function PortfolioViewBody({ view }: { view: PortfolioView }) {
         : [],
     [accounts, view.domain],
   );
+  const open = useMemo<LotRow[]>(
+    () =>
+      view.domain === 'tax_lots'
+        ? accounts.flatMap((a) => a.lots.map((l, i) => ({ ...l, key: `${a.id}:${i}`, account: a })))
+        : [],
+    [accounts, view.domain],
+  );
   const hidden = useAmountsHidden();
   const listKey = portfolioViewsQuery(view.domain).queryKey;
   const save = useMutation({
@@ -1121,6 +1258,17 @@ function PortfolioViewBody({ view }: { view: PortfolioView }) {
       </>
     ),
   };
+  if (view.domain === 'tax_lots') {
+    return (
+      <CustomViewPage
+        {...common}
+        domain={TAX_LOTS}
+        rows={open}
+        rowTitle={(l) => `${l.symbol} · ${l.account.name}`}
+        state={state}
+      />
+    );
+  }
   if (view.domain === 'closed_lots') {
     return (
       <CustomViewPage
@@ -1195,6 +1343,11 @@ export function TransactionsPage() {
   return <PortfolioViewById domain="transactions" id={TRANSACTIONS_ID} />;
 }
 
+/** `/portfolio/tax-lots`: the Tax lots app view. */
+export function TaxLotsPage() {
+  return <PortfolioViewById domain="tax_lots" id={TAX_LOTS_ID} />;
+}
+
 /** `/portfolio/closed-lots`: the Closed lots app view. */
 export function ClosedLotsPage() {
   return <PortfolioViewById domain="closed_lots" id={CLOSED_LOTS_ID} />;
@@ -1203,7 +1356,12 @@ export function ClosedLotsPage() {
 /** `/portfolio/views/$domain/$id`: a person's own view. */
 export function PortfolioViewPage() {
   const { domain, id } = useParams({ from: '/portfolio/views/$domain/$id' });
-  if (domain !== 'holdings' && domain !== 'transactions' && domain !== 'closed_lots') {
+  if (
+    domain !== 'holdings' &&
+    domain !== 'transactions' &&
+    domain !== 'tax_lots' &&
+    domain !== 'closed_lots'
+  ) {
     return (
       <Page crumbs={[{ label: 'Portfolio' }, { label: 'Not found' }]}>
         <ErrorNote>No portfolio views of {domain}.</ErrorNote>
@@ -1215,6 +1373,7 @@ export function PortfolioViewPage() {
 
 const ALL_ACCOUNTS = 'all-accounts';
 const TRANSACTIONS_ID = 'transactions';
+const TAX_LOTS_ID = 'tax-lots';
 const CLOSED_LOTS_ID = 'closed-lots';
 
 /** Masks a holding amount's text while Hide amounts is on. */
@@ -1274,7 +1433,22 @@ function PositionDetails({ holding: h }: { holding: Holding }) {
         ['Expiry', h.expiration ? expLabel(h.expiration) : DASH],
         ['Strike', h.strike === null ? DASH : num(h.strike)],
         ['Quantity', m(num(h.quantity, h.quantity % 1 ? 4 : 0))],
-        ['Avg cost', h.avg_cost === null ? DASH : num(h.avg_cost)],
+        [
+          'Avg cost',
+          h.avg_cost === null ? (
+            DASH
+          ) : lotsOf(h).some((l) => l.cost_from === 'estimate') ? (
+            <span key="a" className="inline-flex items-center gap-1.5">
+              <CostChip
+                label="est."
+                tip={`The broker sent no average cost, so this is the average of the open lots, and some lot costs are estimates (the close on the acquired day; see Tax lots). ${FIX_COST}`}
+              />
+              {num(h.avg_cost)}
+            </span>
+          ) : (
+            num(h.avg_cost)
+          ),
+        ],
         ['Price', h.last === null ? DASH : num(h.last)],
         ['Cost basis', <ViewValueCell key="b" amount value={basis(h)} format="price" />],
         ['Value', <ViewValueCell key="v" amount value={value(h)} format="price" />],
@@ -1324,6 +1498,62 @@ function DetailsTable({
   );
 }
 
+/** The holding's open lots, in every account it spans. */
+const lotsOf = (h: Holding) =>
+  partsOf(h).flatMap((p) => p.account.lots.filter((l) => l.symbol === h.symbol));
+
+const FIX_COST =
+  'To fix it, ask an agent to set the exact cost with portfolio_lot_cost_write, e.g. the vest-day value on your stock plan statement or W-2.';
+
+/**
+ * A chip with the reason behind a number (Bikram, 2026-10-11: chip left of the cost, tooltip with
+ * the derivation and the fix). A tap opens it too, so it works on phones.
+ */
+function CostChip({ label, tip }: { label: string; tip: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Tooltip open={open} onOpenChange={setOpen}>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => {
+            // Radix closes a tooltip on click; a tap opens this one instead.
+            e.preventDefault();
+            setOpen(true);
+          }}
+          className="cursor-help"
+        >
+          <Badge variant="outline" className="h-4 px-1 font-sans text-[10px]">
+            {label}
+          </Badge>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64 text-left">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** A lot's cost cell: an `est.` chip when it is the close that day, `no cost` when there is none. */
+function LotCost({ lot: l }: { lot: TaxLot }) {
+  if (l.cost_from !== 'estimate' && l.cost_from !== 'missing') return <>{num(l.cost)}</>;
+  return (
+    <span className="inline-flex items-center justify-end gap-1.5">
+      {l.cost_from === 'estimate' ? (
+        <CostChip
+          label="est."
+          tip={`The broker sent cost 0 for this lot (common for RSU, ESPP or transferred-in shares), so this is ${l.symbol}'s close on ${l.acquired}, or the last trading day before it. ${FIX_COST}`}
+        />
+      ) : (
+        <CostChip
+          label="no cost"
+          tip={`The broker sent cost 0 for this lot and there is no close on record for ${l.symbol} on ${l.acquired}. ${FIX_COST}`}
+        />
+      )}
+      {l.cost_from === 'estimate' ? num(l.cost) : DASH}
+    </span>
+  );
+}
+
 function LotDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
   const parts = partsOf(h);
@@ -1343,6 +1573,7 @@ function LotDetails({ holding: h }: { holding: Holding }) {
         { label: 'Qty', right: true },
         { label: 'Cost', right: true },
         { label: 'Term' },
+        { label: 'Source' },
       ]}
       rows={lots.map(({ p, l }) => ({
         key: `${p.key}:${l.acquired}:${l.cost}:${l.quantity}`,
@@ -1350,8 +1581,47 @@ function LotDetails({ holding: h }: { holding: Holding }) {
           ...(many ? [p.account.name] : []),
           l.acquired,
           m(num(l.quantity, l.quantity % 1 ? 4 : 0)),
-          num(l.cost),
+          <LotCost key="c" lot={l} />,
           // Retirement accounts are not taxed on sales, so lots carry no term.
+          p.account.tax_type === 'retirement' ? 'n/a' : l.term === 'long' ? 'Long' : 'Short',
+          <SourceChip key="s" lot={l} />,
+        ],
+      }))}
+    />
+  );
+}
+
+function ClosedLotDetails({ holding: h }: { holding: Holding }) {
+  const m = useMask();
+  const parts = partsOf(h);
+  const many = parts.length > 1;
+  const lots = parts
+    .flatMap((p) =>
+      (p.account.closed_lots ?? []).filter((l) => l.symbol === h.symbol).map((l) => ({ p, l })),
+    )
+    .sort((a, b) => b.l.closed.localeCompare(a.l.closed));
+  if (!lots.length)
+    return <p className="text-sm text-muted-foreground">No closed lots of {h.symbol} yet.</p>;
+  return (
+    <DetailsTable
+      head={[
+        ...(many ? [{ label: 'Account' }] : []),
+        { label: 'Acquired' },
+        { label: 'Closed' },
+        { label: 'Qty', right: true },
+        { label: 'Gain', right: true },
+        { label: 'Term' },
+      ]}
+      rows={lots.map(({ p, l }, i) => ({
+        key: `${p.key}:${l.closed}:${l.acquired}:${i}`,
+        cells: [
+          ...(many ? [p.account.name] : []),
+          l.acquired,
+          l.closed,
+          m(num(l.quantity, l.quantity % 1 ? 4 : 0)),
+          <span key="g" className={toneClass(l.gain)}>
+            {m(usd(l.gain))}
+          </span>,
           p.account.tax_type === 'retirement' ? 'n/a' : l.term === 'long' ? 'Long' : 'Short',
         ],
       }))}

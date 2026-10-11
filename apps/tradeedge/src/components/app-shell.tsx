@@ -5,7 +5,10 @@ import {
   PORTFOLIO_DOMAINS,
   type PortfolioDomain,
   addToWatchlist,
+  deleteLogView,
   deletePortfolioView,
+  logViewPath,
+  logViewsQuery,
   portfolioViewPath,
   portfolioViewsQuery,
   quotesQuery,
@@ -255,9 +258,44 @@ function PortfolioSection() {
   );
 }
 
+/**
+ * Logs (Bikram, 2026-10-11): shown only once the person has views of their own over the `logs`
+ * domain; the Logs app view itself opens from the profile menu.
+ */
+function LogsSection() {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const path = useRouterState({ select: (s) => s.location.pathname });
+  const list = useQuery(logViewsQuery());
+  const views = list.data ?? [];
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteLogView(id),
+    onSuccess: (_, id) => {
+      void qc.invalidateQueries({ queryKey: logViewsQuery().queryKey });
+      if (path === logViewPath({ id })) void navigate({ to: '/logs' });
+    },
+  });
+  if (!views.some((v) => !v.app)) return null;
+  return (
+    <SidebarSection
+      label="Logs"
+      onRemove={(item) => remove.mutate(item.id)}
+      removeLabel={(item) => `Delete view ${item.title}`}
+      items={[...views.filter((v) => v.app), ...views.filter((v) => !v.app)].map((v) => ({
+        id: v.id,
+        title: v.name,
+        to: logViewPath(v),
+        icon: viewIcon(v.config),
+        fixed: v.app,
+      }))}
+    />
+  );
+}
+
 /** TradeEdge inside the shared shell: its sections and the routed page. */
 export function StrategyShell() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   return (
     <NewTradeProvider>
       <AppShell
@@ -266,12 +304,14 @@ export function StrategyShell() {
         settings={INTEGRATION_SETTINGS}
         status={<SyncStatus />}
         onRefresh={() => queryClient.refetchQueries({ type: 'active' })}
+        onLogs={() => void navigate({ to: '/logs' })}
         nav={
           <>
             <TradesSection />
             <ScreenersSection />
             <WatchlistSection />
             <PortfolioSection />
+            <LogsSection />
           </>
         }
       >

@@ -24,6 +24,7 @@ import { customViewRoutes } from '../../views/custom-views';
 import { CustomViews } from '../../views/store';
 import { apiRoutes } from './api';
 import { Integrations, integrationRoutes } from './integrations';
+import { Logs, logRequests, logRoutes } from './logs';
 import { Portfolios, portfolioRoutes } from './portfolio';
 import { Screeners, screenerRoutes } from './screeners';
 import { SnapTradeBrokers } from './snaptrade';
@@ -70,20 +71,30 @@ export interface TradeedgeDeps {
   feedback?: Feedback;
   /** Saved CustomViewPage views (D1). Omitted → no `/api/custom-views` and no custom_view_* tools. */
   customViews?: CustomViews;
+  /** Each person's activity log (D1). Omitted → no `/api/logs` and nothing is logged. */
+  logs?: Logs;
 }
 
 /**
  * The D1 stores. Every person's rows are sealed; without the master key their stores stay off.
  * `vault` is returned for the entries that hand it on (researchedge in the suite).
  */
-export function tradeedgeStores(cfg: Config, db: D1Like | undefined, market: MarketService) {
+export function tradeedgeStores(
+  cfg: Config,
+  db: D1Like | undefined,
+  market: MarketService,
+  history?: HistoryService,
+) {
   if (!db) return { vault: undefined };
   const strategies = new Strategies(db);
   const vault = cfg.vaultKek ? new Vault(db, cfg.vaultKek) : undefined;
   if (!vault) return { vault, strategies };
   // Manual accounts are refused for brokers on SnapTrade's public list (Bikram, 2026-10-10).
-  const portfolios = new Portfolios(db, vault, new SnapTradeBrokers().match);
+  // History fills lot costs a broker left at 0 with that day's close (Bikram, 2026-10-11).
+  const portfolios = new Portfolios(db, vault, new SnapTradeBrokers().match, history);
+  const logs = new Logs(db, vault);
   return {
+    logs,
     vault,
     strategies,
     portfolios,
@@ -91,6 +102,7 @@ export function tradeedgeStores(cfg: Config, db: D1Like | undefined, market: Mar
       hookOrigin: cfg.publicOrigin,
       portalReturn: `${tradeOrigin(cfg)}/app/?settings=integrations`,
       market,
+      logs,
       alpaca: {
         optionsFeed: cfg.live?.optionsFeed,
         stockFeed: cfg.live?.stockFeed,
@@ -276,6 +288,10 @@ export function tradeedgeRoutes(
   };
   // Each person's SnapTrade webhook (Bikram, 2026-10-10), open like GitHub's: the id in the path finds
   // the person and SnapTrade's signature is checked with their key. The re-sync runs after the reply.
+  // Logs (Bikram, 2026-10-11): ahead of TradeEdge's own routes only, so no other desk's traffic.
+  if (deps.logs) {
+    app.use('*', logRequests(deps.logs));
+  }
   const integrations = deps.integrations;
   if (integrations) {
     app.post('/api/public/snaptrade-hook/:hookId', async (c) => {
@@ -298,6 +314,7 @@ export function tradeedgeRoutes(
       return c.json({ error: r.status === 401 ? 'bad signature' : 'not found' }, r.status);
     });
   }
+  if (deps.logs) app.route('/api/logs', logRoutes(deps.logs));
   if (deps.portfolios) app.route('/api/portfolios', portfolioRoutes(deps.portfolios));
   if (integrations) app.route('/api/integrations', integrationRoutes(integrations));
   if (deps.trades) app.route('/api/trades', tradeRoutes(deps.trades));

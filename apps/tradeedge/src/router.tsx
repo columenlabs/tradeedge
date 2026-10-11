@@ -76,6 +76,12 @@ const portfolioTransactions = createRoute({
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'TransactionsPage'),
 });
 
+const portfolioTaxLots = createRoute({
+  getParentRoute: () => root,
+  path: '/portfolio/tax-lots',
+  component: lazyRouteComponent(() => import('@/routes/portfolio'), 'TaxLotsPage'),
+});
+
 const portfolioClosedLots = createRoute({
   getParentRoute: () => root,
   path: '/portfolio/closed-lots',
@@ -88,6 +94,18 @@ const portfolioView = createRoute({
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'PortfolioViewPage'),
 });
 
+const logs = createRoute({
+  getParentRoute: () => root,
+  path: '/logs',
+  component: lazyRouteComponent(() => import('@/routes/logs'), 'LogsPage'),
+});
+
+const logView = createRoute({
+  getParentRoute: () => root,
+  path: '/logs/views/$id',
+  component: lazyRouteComponent(() => import('@/routes/logs'), 'LogViewPage'),
+});
+
 const routeTree = root.addChildren([
   index,
   board,
@@ -97,8 +115,11 @@ const routeTree = root.addChildren([
   screener,
   portfolio,
   portfolioTransactions,
+  portfolioTaxLots,
   portfolioClosedLots,
   portfolioView,
+  logs,
+  logView,
 ]);
 
 export const router = createRouter({

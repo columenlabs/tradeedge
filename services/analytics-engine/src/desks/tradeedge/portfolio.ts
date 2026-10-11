@@ -13,6 +13,7 @@ import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
+import type { HistoryService } from '../../history';
 import { type UserVault, type Vault, docWrite, withRetry } from '../../vault';
 
 const MAX_POSITIONS = 500;
@@ -86,6 +87,8 @@ export interface Position {
   right: 'C' | 'P' | null;
   quantity: number;
   avg_cost: number | null;
+  /** `lots`: the broker sent no average cost, so it is the open lots' (see their `cost_from`). */
+  avg_cost_from?: 'lots';
 }
 export type TaxType = 'taxable' | 'retirement';
 /** `snaptrade`: synced from the broker, read-only everywhere. `manual`: a broker SnapTrade can't reach. */
@@ -128,6 +131,27 @@ export interface TaxLot {
   cost: number;
   /** long once held more than a year. */
   term: 'short' | 'long';
+  /**
+   * Set when the cost is not the lot's own (Bikram, 2026-10-11; RSU and transferred-in lots often
+   * come with cost 0): `yours`, set with portfolio_lot_cost_write; `transaction`, the price of that
+   * day's transaction; `estimate`, the unadjusted close on the acquired day; `missing`, none of
+   * these, so the cost stays 0.
+   */
+  cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
+  /**
+   * Where the lot comes from (Bikram, 2026-10-11): `snaptrade`, the broker's lot synced from
+   * SnapTrade; `derived`, worked out first-in first-out from the buys and sells; `manual`, entered
+   * for a manual account (portfolio_lot_write).
+   */
+  source?: LotSource;
+}
+export type LotSource = 'snaptrade' | 'derived' | 'manual';
+/** A cost you set for the lots of one symbol acquired on one day (all of them, or the one of `quantity`). */
+export interface LotCost {
+  symbol: string;
+  acquired: string;
+  quantity?: number;
+  cost: number;
 }
 /** A lot, or the part of one, that a later trade closed. */
 export interface ClosedLot {
@@ -396,6 +420,28 @@ const lotSchema = z
       [l.expiration, l.strike, l.right].every((v) => v !== undefined),
     { message: 'an option needs expiration, strike and right together' },
   );
+/** `portfolio_lot_cost_write` input (MCP) and the PUT body (REST). */
+export const lotCostWriteShape = {
+  portfolio_id: portfolioIdSchema,
+  underlying: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z0-9.^/-]{0,14}$/, 'ticker')
+    .transform((s) => s.toUpperCase())
+    .describe('The stock or fund ticker.'),
+  acquired: z.string().regex(ISO_DATE, 'YYYY-MM-DD').describe("The lot's acquired day."),
+  quantity: z
+    .number()
+    .finite()
+    .optional()
+    .describe('Only the lot of this size that day; leave out for every lot that day.'),
+  cost: z
+    .number()
+    .finite()
+    .nonnegative()
+    .nullable()
+    .describe('Per share, in USD; null clears your cost.'),
+};
+export type LotCostWrite = z.infer<z.ZodObject<typeof lotCostWriteShape>>;
 /** `portfolio_lot_write` input (MCP) and the PUT body (REST): every open lot of a manual account. */
 export const lotWriteShape = {
   portfolio_id: portfolioIdSchema,
@@ -404,7 +450,7 @@ export const lotWriteShape = {
 export type LotInput = z.infer<typeof lotSchema>;
 
 /** A lot as stored: the term is worked out on read. */
-type StoredLot = Omit<TaxLot, 'term'>;
+type StoredLot = Omit<TaxLot, 'term' | 'source'>;
 
 /** One SnapTrade account as the sync hands it over (`snaptrade.ts`). */
 export interface SyncedAccount {
@@ -429,6 +475,8 @@ type StoredPortfolio = Omit<PortfolioSummary, 'id' | 'positions'> & {
   positions: Position[];
   /** The SnapTrade account a synced account mirrors. */
   snaptrade_account_id?: string | null;
+  /** Lot costs you set (portfolio_lot_cost_write); kept across syncs and snapshot writes. */
+  lot_costs?: LotCost[];
 };
 
 /** One trade month of an account's transactions, as sealed in D1 `portfolio_transactions`. */
@@ -464,16 +512,77 @@ const withTerm = (lots: StoredLot[], today = new Date()): TaxLot[] => {
   return lots.map((l) => ({ ...l, term: l.acquired < cutoff ? 'long' : 'short' }));
 };
 
+const OCC = /\d{6}[CP]\d{8}$/;
+/** YYYY-MM-DD `n` days later (earlier when negative). */
+const addDays = (iso: string, n: number) =>
+  new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+
+/** The close on `date`, or the last one before it within a week; null when there is none. */
+type CloseOn = (symbol: string, date: string) => number | null;
+
+/**
+ * Lot costs, first that has one (Bikram, 2026-10-11): yours, the lot's own when not 0, the price of
+ * a transaction of that symbol on the acquired day, the close that day (an estimate). Options keep
+ * their own cost.
+ */
+function costedLots(lots: TaxLot[], own: LotCost[], rows: Transaction[], close: CloseOn) {
+  return lots.map((l): TaxLot => {
+    const mine =
+      own.find(
+        (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === l.quantity,
+      ) ??
+      own.find(
+        (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === undefined,
+      );
+    if (mine) return { ...l, cost: mine.cost, cost_from: 'yours' };
+    if (l.cost > 0 || OCC.test(l.symbol)) return l;
+    const same = rows.filter(
+      (t) =>
+        t.symbol === l.symbol &&
+        t.expiration === null &&
+        t.date === l.acquired &&
+        (t.price ?? 0) > 0,
+    );
+    const tx = same.find((t) => t.quantity === Math.abs(l.quantity)) ?? same[0];
+    if (tx?.price) return { ...l, cost: tx.price, cost_from: 'transaction' };
+    const est = close(l.symbol, l.acquired);
+    return est ? { ...l, cost: est, cost_from: 'estimate' } : { ...l, cost_from: 'missing' };
+  });
+}
+
+/** A stock position the broker sent without an average cost takes its open lots' average. */
+function withLotCost(p: Position, lots: TaxLot[]): Position {
+  if ((p.avg_cost ?? 0) > 0 || p.expiration !== null || p.symbol === MARGIN_CASH) return p;
+  const mine = lots.filter((l) => l.symbol === p.symbol);
+  const qty = mine.reduce((s, l) => s + l.quantity, 0);
+  if (!mine.length || !qty || mine.some((l) => l.cost <= 0)) return p;
+  const avg = mine.reduce((s, l) => s + l.cost * l.quantity, 0) / qty;
+  return { ...p, avg_cost: Math.round(avg * 1e4) / 1e4, avg_cost_from: 'lots' };
+}
+
 const full = (
-  head: Omit<Portfolio, 'lots' | 'lots_source' | 'realized_ytd' | 'closed_lots' | 'checks'>,
+  head: Omit<Portfolio, 'lots' | 'lots_source' | 'realized_ytd' | 'closed_lots' | 'checks'> & {
+    lot_costs?: LotCost[];
+  },
   rows: Transaction[],
   stored: StoredLot[] | null,
+  close: CloseOn = () => null,
 ) => {
+  const { lot_costs: own = [], ...rest } = head;
   const done = toTrades(rows);
   const fifo = fifoLots(done);
-  const lots = stored ? withTerm(stored) : fifo.lots;
+  const source: LotSource = stored
+    ? head.source === 'snaptrade'
+      ? 'snaptrade'
+      : 'manual'
+    : 'derived';
+  const lots = costedLots(stored ? withTerm(stored) : fifo.lots, own, rows, close).map((l) => ({
+    ...l,
+    source,
+  }));
   return {
-    ...head,
+    ...rest,
+    positions: rest.positions.map((p) => withLotCost(p, lots)),
     lots,
     lots_source: stored ? (head.source === 'snaptrade' ? 'broker' : 'yours') : 'transactions',
     realized_ytd: fifo.realized_ytd,
@@ -558,6 +667,8 @@ export class Portfolios {
     private readonly vault: Vault,
     /** Without it (local dev, tests) a manual account may name any broker. */
     private readonly snaptradeBroker?: SnapTradeBrokerCheck,
+    /** Prices lots a broker sent without a cost; without it (self-host, tests) they stay at 0. */
+    private readonly history?: HistoryService,
   ) {}
 
   private async accounts(v: UserVault, id?: string) {
@@ -628,10 +739,12 @@ export class Portfolios {
 
   async list(owner: string): Promise<PortfolioSummary[]> {
     const v = await this.vault.for(owner);
-    return (await this.accounts(v)).map(({ positions, snaptrade_account_id: _, ...head }) => ({
-      ...head,
-      positions: positions.length,
-    }));
+    return (await this.accounts(v)).map(
+      ({ positions, snaptrade_account_id: _, lot_costs: __, ...head }) => ({
+        ...head,
+        positions: positions.length,
+      }),
+    );
   }
 
   async read(owner: string, id: string): Promise<Portfolio> {
@@ -640,10 +753,39 @@ export class Portfolios {
     if (!account) throw new PortfolioNotFound();
     const { snaptrade_account_id: _, ...head } = account;
     const [months, lots] = await Promise.all([this.buckets(v, id), this.storedLots(v, id)]);
-    return full(
-      head,
-      (months.get(id) ?? []).flatMap((m) => m.rows),
-      lots.get(id)?.lots ?? null,
+    const [one] = await this.priced([
+      [head, (months.get(id) ?? []).flatMap((m) => m.rows), lots.get(id)?.lots ?? null],
+    ]);
+    return one as Portfolio;
+  }
+
+  /**
+   * Accounts in full. Lots left without a cost are priced from that day's close in one ClickHouse
+   * read; market data is read on each call, never stored (data rules).
+   */
+  private async priced(
+    input: [Parameters<typeof full>[0], Transaction[], StoredLot[] | null][],
+  ): Promise<Portfolio[]> {
+    const first = input.map(([h, rows, stored]) => full(h, rows, stored));
+    const missing = first.flatMap((p) => p.lots.filter((l) => l.cost_from === 'missing'));
+    if (!missing.length || !this.history?.available) return first;
+    const dates = missing.map((l) => l.acquired).sort();
+    const from = addDays(dates[0] as string, -7);
+    const closes = await this.history
+      .rawCloses([...new Set(missing.map((l) => l.symbol))], from, dates.at(-1) as string)
+      .catch((err) => {
+        console.error('lot cost closes', err);
+        return {} as Record<string, { date: string; close: number }[]>;
+      });
+    const close: CloseOn = (symbol, date) => {
+      const before = (closes[symbol] ?? []).filter((c) => c.date <= date);
+      const last = before.at(-1);
+      return last && last.date >= addDays(date, -7) ? last.close : null;
+    };
+    return input.map(([h, rows, stored], i) =>
+      first[i]?.lots.some((l) => l.cost_from === 'missing')
+        ? full(h, rows, stored, close)
+        : (first[i] as Portfolio),
     );
   }
 
@@ -655,12 +797,12 @@ export class Portfolios {
       this.buckets(v),
       this.storedLots(v),
     ]);
-    return heads.map(({ snaptrade_account_id: _, ...head }) =>
-      full(
+    return this.priced(
+      heads.map(({ snaptrade_account_id: _, ...head }) => [
         head,
         (months.get(head.id) ?? []).flatMap((m) => m.rows),
         lots.get(head.id)?.lots ?? null,
-      ),
+      ]),
     );
   }
 
@@ -729,6 +871,7 @@ export class Portfolios {
       as_of: input.as_of ? new Date(input.as_of).toISOString() : new Date().toISOString(),
       updated_at: new Date().toISOString(),
       positions,
+      ...(existing?.lot_costs ? { lot_costs: existing.lot_costs } : {}),
     });
     return this.read(owner, id);
   }
@@ -757,6 +900,7 @@ export class Portfolios {
       as_of: now,
       updated_at: now,
       positions: checkedPositions(positionSchema.array().parse(input.positions)),
+      ...(mine?.lot_costs ? { lot_costs: mine.lot_costs } : {}),
     });
     await this.saveLots(v, id, input.lots ? input.lots.map(toLot) : null);
     if (input.transactions.length) await this.upsertTransactions(v, id, input.transactions);
@@ -786,6 +930,34 @@ export class Portfolios {
       ...stored,
       tax_type: taxType,
     });
+  }
+
+  /**
+   * Sets (or, with cost null, clears) your cost for one symbol's lots acquired on one day, on any
+   * account, SnapTrade's too: a broker often has no cost for RSU or transferred-in shares. It
+   * outranks the broker's cost and the estimate, and survives syncs.
+   */
+  async writeLotCost(owner: string, input: LotCostWrite): Promise<Portfolio> {
+    const v = await this.vault.for(owner);
+    const { id, ...stored } = await this.own(v, input.portfolio_id);
+    const symbol = input.underlying;
+    const same = (o: LotCost) =>
+      o.symbol === symbol && o.acquired === input.acquired && o.quantity === input.quantity;
+    const rest = (stored.lot_costs ?? []).filter((o) => !same(o));
+    const lot_costs =
+      input.cost === null
+        ? rest
+        : [
+            ...rest,
+            {
+              symbol,
+              acquired: input.acquired,
+              ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
+              cost: Math.round(input.cost * 1e4) / 1e4,
+            },
+          ];
+    await this.store(v, id, await v.index(`portfolio:${stored.name}`), { ...stored, lot_costs });
+    return this.read(owner, id);
   }
 
   /** Replaces a manual account's lots (all of them); an empty list goes back to FIFO lots. */
@@ -1032,6 +1204,12 @@ export function portfolioRoutes(portfolios: Portfolios) {
     if (!parsed.success) return c.json(invalid(parsed.error.issues), 400);
     const { portfolio_id, transactions } = parsed.data;
     return c.json(await portfolios.writeTransactions(owner(c), portfolio_id, transactions));
+  });
+  const writeLotCost = z.object(lotCostWriteShape);
+  r.put('/:id/lot-costs', async (c) => {
+    const parsed = writeLotCost.safeParse({ ...(await body(c)), portfolio_id: c.req.param('id') });
+    if (!parsed.success) return c.json(invalid(parsed.error.issues), 400);
+    return c.json(await portfolios.writeLotCost(owner(c), parsed.data));
   });
   const writeLots = z.object(lotWriteShape);
   r.put('/:id/lots', async (c) => {

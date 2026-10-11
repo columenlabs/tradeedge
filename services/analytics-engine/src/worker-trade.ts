@@ -10,7 +10,7 @@
  *   /mcp        the TradeEdge MCP
  */
 import { AlpacaClient } from '@edgedesk/providers';
-import { Hono } from 'hono';
+import { type ExecutionContext, Hono } from 'hono';
 import { loadConfig } from './config';
 import type { D1Like } from './d1';
 import {
@@ -88,12 +88,13 @@ function createTradeApp(env: Env) {
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     appPromise ??= Promise.resolve().then(() => createTradeApp(env));
     // Don't pin a failed init for the isolate's lifetime.
     appPromise.catch(() => {
       appPromise = undefined;
     });
-    return (await appPromise).fetch(req);
+    // The context lets a route finish work after its reply (SnapTrade's webhook re-sync).
+    return (await appPromise).fetch(req, undefined, ctx);
   },
 };

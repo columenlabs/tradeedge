@@ -217,6 +217,8 @@ export interface Position {
   right: 'C' | 'P' | null;
   quantity: number;
   avg_cost: number | null;
+  /** `lots`: the broker sent none, so it is the open lots' average. */
+  avg_cost_from?: 'lots';
 }
 export interface TaxLot {
   symbol: string;
@@ -224,6 +226,10 @@ export interface TaxLot {
   quantity: number;
   cost: number;
   term: 'short' | 'long';
+  /** Set when the cost is not the lot's own: yours, a transaction's price, the close that day, or none. */
+  cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
+  /** snaptrade (the broker's, synced), derived (first in first out from trades) or manual (entered). */
+  source?: 'snaptrade' | 'derived' | 'manual';
 }
 /** A lot, or part of one, a later trade closed; cost, proceeds and gain in USD, fees included. */
 export interface ClosedLot {
@@ -299,8 +305,13 @@ export const allTransactionsQuery = () =>
 // ── Portfolio views (the shared custom view store): app views first, then the person's own ──
 
 /** The portfolio's view domains: holdings rows and transaction rows. */
-export type PortfolioDomain = 'holdings' | 'transactions' | 'closed_lots';
-export const PORTFOLIO_DOMAINS: PortfolioDomain[] = ['holdings', 'transactions', 'closed_lots'];
+export type PortfolioDomain = 'holdings' | 'transactions' | 'tax_lots' | 'closed_lots';
+export const PORTFOLIO_DOMAINS: PortfolioDomain[] = [
+  'holdings',
+  'transactions',
+  'tax_lots',
+  'closed_lots',
+];
 export type PortfolioView = CustomView & { domain: PortfolioDomain };
 
 export const portfolioViewsQuery = (domain: PortfolioDomain) =>
@@ -330,10 +341,53 @@ export const portfolioViewPath = (v: { app?: boolean; domain: string; id: string
       ? '/portfolio/transactions'
       : v.domain === 'closed_lots'
         ? '/portfolio/closed-lots'
-        : '/portfolio'
+        : v.domain === 'tax_lots'
+          ? '/portfolio/tax-lots'
+          : '/portfolio'
     : `/portfolio/views/${v.domain}/${v.id}`;
 export const deletePortfolioView = (domain: PortfolioDomain, id: string) =>
   send<{ deleted: string }>('DELETE', `/api/v1/custom-views/${domain}/${enc(id)}`);
+
+// ── Logs (Bikram, 2026-10-11): the person's own activity, newest first ──
+
+export type LogCategory = 'snaptrade' | 'mcp' | 'user' | 'backend';
+export interface LogEntry {
+  id: string;
+  at: string;
+  category: LogCategory;
+  what: string;
+  ok: boolean;
+  ms?: number;
+  detail?: string;
+}
+export const logsQuery = () =>
+  queryOptions({
+    queryKey: ['logs'],
+    queryFn: async () => (await getJson<{ logs: LogEntry[] }>('/api/v1/logs?limit=1000')).logs,
+    staleTime: 15_000,
+  });
+
+/** Views of the `logs` domain: the Logs app view, then the person's own. */
+export type LogView = CustomView & { domain: 'logs' };
+export const logViewsQuery = () =>
+  queryOptions({
+    queryKey: ['custom-views', 'logs'],
+    queryFn: async () =>
+      (await getJson<{ custom_views: LogView[] }>('/api/v1/custom-views?domain=logs')).custom_views,
+    staleTime: 60_000,
+  });
+export const saveLogView = ({ name, ...config }: CustomViewConfig, id?: string) =>
+  send<LogView>('POST', '/api/v1/custom-views', {
+    domain: 'logs',
+    ...(id ? { id } : {}),
+    name,
+    config,
+  });
+export const deleteLogView = (id: string) =>
+  send<{ deleted: string }>('DELETE', `/api/v1/custom-views/logs/${enc(id)}`);
+/** The Logs app view opens at `/logs`, a person's own log views under `/logs/views`. */
+export const logViewPath = (v: { app?: boolean; id: string }) =>
+  v.app ? '/logs' : `/logs/views/${v.id}`;
 
 // ── Screeners (Bikram, 2026-10-10): saved screener_run inputs, kept by agents through the MCP ──
 
