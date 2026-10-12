@@ -522,9 +522,9 @@ function FieldTree<T>({
             </Badge>
           )}
         </Label>
-        <span className="ml-auto shrink-0 text-[0.7rem] text-muted-foreground">
+        <Badge variant="secondary" className="ml-auto shrink-0 font-normal">
           {FORMAT_NAMES[f.format] ?? f.format}
-        </span>
+        </Badge>
         <code
           className="max-w-[40%] truncate font-mono text-[0.7rem] text-muted-foreground max-md:hidden"
           title={f.formula ?? f.key}

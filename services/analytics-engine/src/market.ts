@@ -38,7 +38,7 @@ export interface ChainParams {
 
 export class LiveDataUnavailable extends Error {
   constructor() {
-    super('live data not configured');
+    super('No live data yet: add your Alpaca key under Settings ▸ Integrations');
   }
 }
 

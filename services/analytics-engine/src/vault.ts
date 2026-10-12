@@ -317,6 +317,20 @@ const SEALED_TABLES: {
     aad: (r: Record<string, string>) => ({ data: `${table}:${r.id}` }),
   })),
   {
+    table: 'posts',
+    key: ['id'],
+    owner: 'own',
+    sealed: ['data'],
+    aad: (r) => ({ data: `posts:${r.id}` }),
+  },
+  {
+    table: 'schedules',
+    key: ['owner'],
+    owner: 'own',
+    sealed: ['data'],
+    aad: (r) => ({ data: `schedules:${r.owner}` }),
+  },
+  {
     table: 'integrations',
     key: ['owner', 'provider'],
     owner: 'own',

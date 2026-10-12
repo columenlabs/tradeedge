@@ -34,6 +34,8 @@ const CATEGORY: Record<LogEntry['category'], string> = {
   mcp: 'MCP',
   user: 'User',
   backend: 'Backend',
+  x: 'X',
+  schedules: 'Schedules',
 };
 
 /** `Oct 11, 10:31:02` in the time zone the status bar shows. */

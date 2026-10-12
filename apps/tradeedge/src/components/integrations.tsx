@@ -1,6 +1,6 @@
 // Settings ▸ Integrations (Bikram, 2026-10-10): the services TradeEdge connects to with the person's
 // own keys, one list, each row expanding in place (all collapsed at first; Bikram, 2026-10-12): SnapTrade (key, sync, webhook) and Alpaca (live
-// data key), plus Robinhood (Bikram, 2026-10-12: OAuth sign-in to its agentic-trading MCP) ntfy (an ntfy.sh topic per person) and webhooks; Settings ▸ Events picks which targets each event goes to. Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
+// data key), plus Robinhood (Bikram, 2026-10-12: OAuth sign-in to its agentic-trading MCP), X (twitterapi.io key, tracked accounts), ntfy (an ntfy.sh topic per person) and webhooks; Settings ▸ Events picks which targets each event goes to. Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
 // SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
 // Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
@@ -15,6 +15,7 @@ import {
   type SyncReport,
   type TaxType,
   type WebhookTarget,
+  type XStatus,
   addWebhook,
   connectRobinhood,
   createNtfy,
@@ -24,11 +25,14 @@ import {
   deleteRobinhood,
   deleteSnapTradeKey,
   deleteWebhook,
+  deleteX,
   finishRobinhood,
   holdingsAccountsQuery,
   integrationsQuery,
   saveAlpacaKey,
+  saveNtfyToken,
   saveSnapTradeKey,
+  saveX,
   setAccountTrade,
   setNotifyEvent,
   setSnapTradeAccount,
@@ -39,6 +43,7 @@ import {
   testRobinhood,
   testSnapTrade,
   testWebhook,
+  testX,
   writeLots,
   writeManualAccount,
   writeTransactions,
@@ -101,6 +106,7 @@ import {
   Trash2Icon,
   UploadIcon,
   WebhookIcon,
+  XIcon,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
@@ -1359,6 +1365,217 @@ function Robinhood({ status }: { status: RobinhoodStatus }) {
   );
 }
 
+// ── X (Bikram, 2026-10-12): posts from tracked accounts, through the person's own twitterapi.io key ──
+
+const usd = (n: number) => `$${n.toFixed(2)}`;
+
+function XKeyForm({ onSaved }: { onSaved?: () => void }) {
+  const qc = useQueryClient();
+  const [key, setKey] = useState('');
+  const save = useMutation({
+    mutationFn: () => saveX({ api_key: key.trim() }),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      void qc.invalidateQueries({ queryKey: ['integrations'] });
+      void qc.invalidateQueries({ queryKey: ['schedules'] });
+      setKey('');
+      onSaved?.();
+    },
+  });
+  return (
+    <form
+      className="grid grid-cols-1 gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (key.trim()) save.mutate();
+      }}
+    >
+      <Field id="x-key" label="twitterapi.io API key">
+        <Input
+          id="x-key"
+          type="password"
+          className="num"
+          autoComplete="off"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+        />
+      </Field>
+      <ErrorLine error={save.error} />
+      <Button
+        type="submit"
+        size="sm"
+        className="justify-self-end"
+        disabled={!key.trim() || save.isPending}
+      >
+        {save.isPending ? <RefreshCwIcon className="animate-spin" /> : <CheckIcon />}
+        {save.isPending ? 'Checking…' : 'Save key'}
+      </Button>
+    </form>
+  );
+}
+
+/** The tracked accounts: chips to remove, a box to add one or several (spaces or commas). */
+function TrackedAccounts({ handles }: { handles: string[] }) {
+  const qc = useQueryClient();
+  const [add, setAdd] = useState('');
+  const save = useMutation({
+    mutationFn: (next: string[]) => saveX({ handles: next }),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      setAdd('');
+    },
+  });
+  const added = add
+    .split(/[\s,]+/)
+    .map((h) => h.trim())
+    .filter(Boolean);
+  return (
+    <div className="grid grid-cols-1 gap-2">
+      {handles.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {handles.map((h) => (
+            <Badge key={h} variant="secondary" className="gap-1 pr-1">
+              @{h}
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={`Stop tracking @${h}`}
+                disabled={save.isPending}
+                onClick={() => save.mutate(handles.filter((x) => x !== h))}
+              >
+                <XIcon />
+              </Button>
+            </Badge>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">No accounts yet. Add the ones to follow.</p>
+      )}
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (added.length) save.mutate([...handles, ...added]);
+        }}
+      >
+        <InputGroup>
+          <InputGroupAddon>@</InputGroupAddon>
+          <InputGroupInput
+            aria-label="Add X accounts"
+            placeholder="handle, or several"
+            autoComplete="off"
+            value={add}
+            onChange={(e) => setAdd(e.target.value)}
+          />
+          <InputGroupAddon align="inline-end">
+            <InputGroupButton type="submit" disabled={!added.length || save.isPending}>
+              <PlusIcon />
+              Add
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+      </form>
+      <ErrorLine error={save.error} />
+    </div>
+  );
+}
+
+function XConnected({ status }: { status: Extract<XStatus, { connected: true }> }) {
+  const qc = useQueryClient();
+  const clock = useClock();
+  const [newKey, setNewKey] = useState(false);
+  const remove = useMutation({
+    mutationFn: deleteX,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['integrations'] });
+      void qc.invalidateQueries({ queryKey: ['schedules'] });
+    },
+  });
+  const check = status.last_check;
+  const credit = status.credit;
+  return (
+    <div className="grid grid-cols-1 gap-5">
+      <Section title="Source · twitterapi.io, you pay them directly">
+        <KeyTestLine test={status.last_test} run={testX} />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="num">{status.api_key}</span>
+          <span className="text-xs text-muted-foreground">saved {clock(status.saved_at)}</span>
+          <span className="flex-1" />
+          <Button size="sm" variant="ghost" onClick={() => setNewKey((o) => !o)}>
+            <PencilIcon />
+            Change key
+          </Button>
+        </div>
+        {newKey ? <XKeyForm onSaved={() => setNewKey(false)} /> : null}
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+          <dt className="text-muted-foreground">Credit</dt>
+          <dd className="num">
+            {credit ? (
+              <>
+                {usd(credit.usd)}
+                <span className="text-xs text-muted-foreground">
+                  {' '}
+                  · {usd(credit.paid)} paid, {usd(credit.bonus)} bonus · as of {clock(credit.at)}
+                </span>
+              </>
+            ) : (
+              <span className="text-muted-foreground">Run Test to read it</span>
+            )}
+          </dd>
+          <dt className="text-muted-foreground">Last check</dt>
+          <dd className={cn(check && !check.ok && 'text-loss')}>
+            {check
+              ? `${clock(check.at)} · ${check.ok ? `${check.posts} new post${check.posts === 1 ? '' : 's'}` : `failed: ${check.error}`}`
+              : 'Not yet: the Check X schedules run it (profile menu ▸ Schedules)'}
+          </dd>
+        </dl>
+      </Section>
+      <Section title={`Tracked accounts · ${status.handles.length}`}>
+        <TrackedAccounts handles={status.handles} />
+      </Section>
+      <Section title="Extraction">
+        <p className="text-sm text-muted-foreground">
+          Each post is tagged with its symbols and its macro theme and sentiment, on Workers AI.
+        </p>
+      </Section>
+      <div className="flex justify-end">
+        <ConfirmDelete
+          title="Disconnect X?"
+          description="Your twitterapi.io key and tracked accounts are deleted and checks stop. Posts already stored stay until they age out."
+          action="Disconnect"
+          onConfirm={() => remove.mutate()}
+        >
+          <Button size="sm" variant="destructive">
+            <Trash2Icon />
+            Disconnect
+          </Button>
+        </ConfirmDelete>
+      </div>
+      <ErrorLine error={remove.error} />
+    </div>
+  );
+}
+
+function XIntegration({ status }: { status: XStatus }) {
+  if (status.connected) return <XConnected status={status} />;
+  return (
+    <div className="grid grid-cols-1 gap-3">
+      <p className="text-sm">
+        Posts from the X accounts you track, tagged with symbols, macro themes and sentiment. Sign
+        up at twitterapi.io (pay as you go, a free sign-up credit), copy your API key and paste it
+        here. You pay twitterapi.io directly: about $0.15 per 1,000 posts.
+      </p>
+      <Button size="sm" variant="outline" className="justify-self-start" asChild>
+        <a href="https://twitterapi.io/dashboard" target="_blank" rel="noreferrer">
+          <ExternalLinkIcon />
+          Open twitterapi.io
+        </a>
+      </Button>
+      <XKeyForm />
+    </div>
+  );
+}
+
 // ── Notifications (ntfy) ──
 
 const NTFY_IOS = 'https://apps.apple.com/us/app/ntfy/id1625396347';
@@ -1393,6 +1610,66 @@ function CopyField({ id, value }: { id: string; value: string }) {
   );
 }
 
+/**
+ * The person's ntfy.sh access token (Bikram, 2026-10-12): ntfy.sh limits anonymous and free sends per address,
+ * and TradeEdge sends from Cloudflare's shared ones, so sends go out under the person's own paid account.
+ */
+function NtfyToken({ token }: { token: string | null }) {
+  const qc = useQueryClient();
+  const [value, setValue] = useState('');
+  const save = useMutation({
+    mutationFn: () => saveNtfyToken(value.trim()),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      setValue('');
+    },
+  });
+  return (
+    <Section title="Access token">
+      <p className="text-sm">
+        This needs a paid account at{' '}
+        <a className="underline" href="https://ntfy.sh/account" target="_blank" rel="noreferrer">
+          ntfy.sh
+        </a>
+        (Supporter or above): ntfy.sh limits free accounts by sending address, and TradeEdge sends
+        from Cloudflare's shared addresses. Open Account ▸ Access tokens, create one and paste it
+        here.
+      </p>
+      {token ? (
+        <p className="text-sm">
+          Saved <span className="num">{token}</span>
+        </p>
+      ) : null}
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value.trim()) save.mutate();
+        }}
+      >
+        <div className="min-w-0 flex-1">
+          <Field id="ntfy-token" label={token ? 'Replace token' : 'Access token'}>
+            <Input
+              id="ntfy-token"
+              type="password"
+              className="num"
+              autoComplete="off"
+              placeholder="tk_…"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          </Field>
+        </div>
+        <Button type="submit" size="sm" disabled={!value.trim() || save.isPending}>
+          {save.isPending ? <RefreshCwIcon className="animate-spin" /> : <CheckIcon />}
+          Save
+        </Button>
+      </form>
+      <ErrorLine error={save.error} />
+    </Section>
+  );
+}
+
 function Ntfy({ status }: { status: NtfyStatus }) {
   const qc = useQueryClient();
   const create = useMutation({
@@ -1408,7 +1685,8 @@ function Ntfy({ status }: { status: NtfyStatus }) {
       <div className="grid grid-cols-1 gap-3">
         <p className="text-sm">
           Get TradeEdge alerts on your phone through the free ntfy app. TradeEdge makes you a
-          private topic (a random name only you know) and sends to it. No account or sign-up.
+          private topic (a random name only you know) and sends to it with the access token of your
+          own paid ntfy.sh account.
         </p>
         <ErrorLine error={create.error} />
         <Button
@@ -1440,17 +1718,19 @@ function Ntfy({ status }: { status: NtfyStatus }) {
           <li>
             Open it, tap + (Subscribe to topic) and paste your topic. Keep the server as ntfy.sh.
           </li>
-          <li>Allow notifications when your phone asks, then tap Test below.</li>
+          <li>
+            Allow notifications when your phone asks, add your access token below, then tap Test.
+          </li>
         </ol>
         <Field id="ntfy-topic" label="Your topic (keep it private: anyone with it can read it)">
           <CopyField id="ntfy-topic" value={status.topic} />
         </Field>
       </Section>
+      <NtfyToken token={status.token} />
       <Section title="Test">
         <KeyTestLine test={status.last_test} run={testNtfy} />
       </Section>
       <div className="flex flex-wrap items-center gap-2">
-        <EventsLink />
         <ErrorLine error={remove.error} />
         <span className="flex-1" />
         <ConfirmDelete
@@ -1466,17 +1746,6 @@ function Ntfy({ status }: { status: NtfyStatus }) {
         </ConfirmDelete>
       </div>
     </div>
-  );
-}
-
-/** Settings ▸ Events, where each event's targets are chosen. */
-function EventsLink() {
-  const { openSettings } = useShell();
-  return (
-    <Button size="sm" variant="outline" onClick={() => openSettings('events')}>
-      <BellRingIcon />
-      Choose events
-    </Button>
   );
 }
 
@@ -1566,7 +1835,6 @@ function Webhooks({ hooks }: { hooks: WebhookTarget[] }) {
           </Field>
           <ErrorLine error={add.error} />
           <div className="flex flex-wrap items-center gap-2">
-            {hooks.length ? <EventsLink /> : null}
             <span className="flex-1" />
             <Button type="submit" size="sm" disabled={!name.trim() || !url.trim() || add.isPending}>
               {add.isPending ? <RefreshCwIcon className="animate-spin" /> : <PlusIcon />}
@@ -1728,6 +1996,28 @@ function Integrations() {
         <Robinhood status={q.data.robinhood} />
       </IntegrationRow>
       <IntegrationRow
+        name="X"
+        meta={
+          q.data.x.connected
+            ? `Posts from ${q.data.x.handles.length} tracked account${q.data.x.handles.length === 1 ? '' : 's'} · twitterapi.io`
+            : 'Posts from the X accounts you track · twitterapi.io'
+        }
+        open={open === 'x'}
+        onOpenChange={toggle('x')}
+        badge={
+          !q.data.x.connected ? (
+            <Badge variant="outline">Not connected</Badge>
+          ) : (
+            <TestBadge
+              test={q.data.x.last_test}
+              ok={q.data.x.credit ? `Works · ${usd(q.data.x.credit.usd)}` : 'Works'}
+            />
+          )
+        }
+      >
+        <XIntegration status={q.data.x} />
+      </IntegrationRow>
+      <IntegrationRow
         name="ntfy"
         meta="Phone notifications through the ntfy app"
         open={open === 'ntfy'}
@@ -1833,7 +2123,7 @@ export const INTEGRATION_SETTINGS: SettingsSectionDef[] = [
     id: 'integrations',
     title: 'Integrations',
     icon: PlugIcon,
-    description: 'SnapTrade, Alpaca, Robinhood, ntfy and webhooks, with your own sign-ins.',
+    description: 'SnapTrade, Alpaca, Robinhood, X, ntfy and webhooks, with your own sign-ins.',
     content: <Integrations />,
   },
   {

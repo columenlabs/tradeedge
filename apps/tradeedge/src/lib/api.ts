@@ -396,7 +396,7 @@ export const deletePortfolioView = (domain: PortfolioDomain, id: string) =>
 
 // ── Logs (Bikram, 2026-10-11): the person's own activity, newest first ──
 
-export type LogCategory = 'snaptrade' | 'mcp' | 'user' | 'backend';
+export type LogCategory = 'snaptrade' | 'mcp' | 'user' | 'backend' | 'x' | 'schedules';
 export interface LogEntry {
   id: string;
   at: string;
@@ -563,10 +563,29 @@ export interface IntegrationsStatus {
     | { connected: false }
     | { connected: true; key_id: string; saved_at: string; last_test: KeyTest | null };
   robinhood: RobinhoodStatus;
+  x: XStatus;
   ntfy: NtfyStatus;
   webhooks: WebhookTarget[];
   events: NotifyEventStatus[];
 }
+/** twitterapi.io credit in dollars: paid (never expires) and the sign-up bonus (31 days). */
+export interface XCredit {
+  at: string;
+  usd: number;
+  paid: number;
+  bonus: number;
+}
+export type XStatus =
+  | { connected: false }
+  | {
+      connected: true;
+      api_key: string;
+      handles: string[];
+      saved_at: string;
+      credit: XCredit | null;
+      last_test: KeyTest | null;
+      last_check: { at: string; ok: boolean; posts: number; error: string | null } | null;
+    };
 /** A webhook target (Bikram, 2026-10-12); `url` is masked. */
 export interface WebhookTarget {
   id: string;
@@ -589,6 +608,8 @@ export type NtfyStatus =
       connected: true;
       server: string;
       topic: string;
+      /** The person's ntfy.sh access token, masked; null until they add one. */
+      token: string | null;
       created_at: string;
       last_test: KeyTest | null;
     };
@@ -653,7 +674,130 @@ export const finishRobinhood = (url: string) =>
 export const testRobinhood = () =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/robinhood/test', {});
 export const deleteRobinhood = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/robinhood');
+/** The person's twitterapi.io key and/or tracked X accounts (the list replaces the old one). */
+export const saveX = (change: { api_key?: string; handles?: string[] }) =>
+  send<IntegrationsStatus>('PUT', '/api/v1/integrations/x', change);
+export const testX = () => send<IntegrationsStatus>('POST', '/api/v1/integrations/x/test', {});
+export const deleteX = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/x');
+
+// ── Posts (Bikram, 2026-10-12): what the tracked X accounts post, tagged ──
+
+export const THEMES = {
+  fed_rates: 'Fed and rates',
+  inflation: 'Inflation',
+  jobs: 'Jobs',
+  earnings: 'Earnings',
+  oil: 'Oil',
+  crypto: 'Crypto',
+  geopolitics: 'Geopolitics',
+  ai_semis: 'AI and semis',
+  credit: 'Credit',
+} as const;
+export type Theme = keyof typeof THEMES;
+export interface Post {
+  id: string;
+  url: string;
+  at: string;
+  handle: string;
+  name: string;
+  text: string;
+  symbols: string[];
+  theme: Theme | null;
+  theme_conf: number | null;
+  /** −1 very bearish … +1 very bullish. */
+  sentiment: number | null;
+  sentiment_conf: number | null;
+}
+export interface PostsPage {
+  /** `d1`: kept 30 days; `dataedge`: kept for good. */
+  store: 'd1' | 'dataedge';
+  kept: string;
+  posts: Post[];
+}
+/** The last 7 days of posts (the views filter and group them on the client). */
+export const postsQuery = () =>
+  queryOptions({
+    queryKey: ['posts'],
+    queryFn: () => getJson<PostsPage>('/api/v1/posts?hours=168&limit=2000'),
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+/** Feed and Macro read one row per post (`posts`), By symbol one per post and symbol (`post_symbols`). */
+export const POST_DOMAINS = ['posts', 'post_symbols'] as const;
+export type PostDomain = (typeof POST_DOMAINS)[number];
+export type PostView = CustomView & { domain: PostDomain };
+/** Both domains' views: the app views first (Feed, By symbol, Macro), then the person's own. */
+export const postViewsQuery = () =>
+  queryOptions({
+    queryKey: ['custom-views', 'posts'],
+    queryFn: async () => {
+      const lists = await Promise.all(
+        POST_DOMAINS.map(
+          async (d) =>
+            (await getJson<{ custom_views: PostView[] }>(`/api/v1/custom-views?domain=${d}`))
+              .custom_views,
+        ),
+      );
+      const all = lists.flat();
+      const order = ['feed', 'by-symbol', 'macro'];
+      return [
+        ...all.filter((v) => v.app).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
+        ...all.filter((v) => !v.app),
+      ];
+    },
+    staleTime: 60_000,
+  });
+export const savePostView = (
+  domain: PostDomain,
+  { name, ...config }: CustomViewConfig,
+  id?: string,
+) =>
+  send<PostView>('POST', '/api/v1/custom-views', {
+    domain,
+    ...(id ? { id } : {}),
+    name,
+    config,
+  });
+export const deletePostView = (domain: PostDomain, id: string) =>
+  send<{ deleted: string }>('DELETE', `/api/v1/custom-views/${domain}/${enc(id)}`);
+/** App views open at `/posts/<id>`, a person's own at `/posts/views/<domain>/<id>`. */
+export const postViewPath = (v: { app?: boolean; id: string; domain: PostDomain }) =>
+  v.app ? `/posts/${v.id}` : `/posts/views/${v.domain}/${v.id}`;
+
+// ── Schedules (Bikram, 2026-10-12): work TradeEdge runs on its own, changeable by the person ──
+
+export type ScheduleId = 'x_market' | 'x_outside' | 'posts_prune';
+export interface Schedule {
+  id: ScheduleId;
+  name: string;
+  on: boolean;
+  /** Minutes between runs. */
+  every: number;
+  from: string;
+  to: string;
+  days: number[];
+  tz: string;
+  last: { at: string; ok: boolean; detail: string } | null;
+  next: string | null;
+  /** Why it can't run now (X not connected). */
+  waiting: string | null;
+}
+export type ScheduleChange = Partial<
+  Pick<Schedule, 'on' | 'every' | 'from' | 'to' | 'days' | 'tz'>
+>;
+export const schedulesQuery = () =>
+  queryOptions({
+    queryKey: ['schedules'],
+    queryFn: async () => (await getJson<{ schedules: Schedule[] }>('/api/v1/schedules')).schedules,
+    staleTime: 30_000,
+  });
+export const saveSchedule = (id: ScheduleId, change: ScheduleChange) =>
+  send<{ schedules: Schedule[] }>('PUT', `/api/v1/schedules/${id}`, change);
+export const runSchedule = (id: ScheduleId) =>
+  send<{ run: Schedule['last']; schedules: Schedule[] }>('POST', `/api/v1/schedules/${id}/run`, {});
 export const createNtfy = () => send<IntegrationsStatus>('POST', '/api/v1/integrations/ntfy', {});
+export const saveNtfyToken = (token: string) =>
+  send<IntegrationsStatus>('PUT', '/api/v1/integrations/ntfy/token', { token });
 export const testNtfy = () =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/ntfy/test', {});
 export const deleteNtfy = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/ntfy');

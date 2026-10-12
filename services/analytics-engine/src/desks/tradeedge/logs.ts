@@ -7,6 +7,8 @@
  *   mcp        each MCP tool call: the tool, its outcome and time, never its arguments or results
  *   user       the person's own changes from the app or REST (writes only)
  *   backend    work that failed on the server (5xx) while serving the person
+ *   x          each call to twitterapi.io: checks for new posts (with the posts and calls) and key tests
+ *   schedules  the person's schedules that touch no outside service (Prune old posts)
  */
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
@@ -15,7 +17,7 @@ import type { D1Like } from '../../d1';
 import type { Vault } from '../../vault';
 import { portfolioOwner } from './portfolio';
 
-export const LOG_CATEGORIES = ['snaptrade', 'mcp', 'user', 'backend'] as const;
+export const LOG_CATEGORIES = ['snaptrade', 'mcp', 'user', 'backend', 'x', 'schedules'] as const;
 export type LogCategory = (typeof LOG_CATEGORIES)[number];
 
 export interface LogEvent {

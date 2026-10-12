@@ -7,13 +7,17 @@ import {
   addToWatchlist,
   deleteLogView,
   deletePortfolioView,
+  deletePostView,
   logViewPath,
   logViewsQuery,
   portfolioViewPath,
   portfolioViewsQuery,
+  postViewPath,
+  postViewsQuery,
   quotesQuery,
   removeFromWatchlist,
   savePortfolioView,
+  savePostView,
   screenersQuery,
   watchlistQuery,
 } from '@/lib/api';
@@ -318,6 +322,68 @@ function SymbolsSection() {
 }
 
 /**
+ * Posts (Bikram, 2026-10-12): what the tracked X accounts post. The app views Feed, By symbol and
+ * Macro, then the person's own. `+` starts a new view of posts.
+ */
+function PostsSection() {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const path = useRouterState({ select: (s) => s.location.pathname });
+  const list = useQuery(postViewsQuery());
+  const views = list.data ?? [];
+  const listKey = postViewsQuery().queryKey;
+  const create = useMutation({
+    mutationFn: () =>
+      savePostView('posts', {
+        name: 'New view',
+        shape: 'table',
+        formulas: [],
+        tiles: [],
+        columns: ['at', 'handle', 'text', 'symbols', 'theme', 'sentiment'],
+        chips: [],
+        icon: null,
+        widgets: [],
+        group: { fields: [], default: null },
+        filters: { fields: [], default: [] },
+        pivot: null,
+        sort: { key: 'at', desc: true },
+      }),
+    onSuccess: (v) => {
+      void qc.invalidateQueries({ queryKey: listKey });
+      void navigate({ to: postViewPath(v) });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (v: { domain: 'posts' | 'post_symbols'; id: string }) =>
+      deletePostView(v.domain, v.id),
+    onSuccess: (_, v) => {
+      void qc.invalidateQueries({ queryKey: listKey });
+      if (path === postViewPath(v)) void navigate({ to: '/posts/$id', params: { id: 'feed' } });
+    },
+  });
+  return (
+    <SidebarSection
+      label="Posts"
+      loading={list.isPending}
+      onAdd={() => create.mutate()}
+      addLabel="New view of posts"
+      onRemove={(item) => {
+        const v = views.find((x) => `${x.domain}/${x.id}` === item.id);
+        if (v) remove.mutate(v);
+      }}
+      removeLabel={(item) => `Delete view ${item.title}`}
+      items={views.map((v) => ({
+        id: `${v.domain}/${v.id}`,
+        title: v.name,
+        to: postViewPath(v),
+        icon: viewIcon(v.config),
+        fixed: v.app,
+      }))}
+    />
+  );
+}
+
+/**
  * Logs (Bikram, 2026-10-11): shown only once the person has views of their own over the `logs`
  * domain; the Logs app view itself opens from the profile menu.
  */
@@ -364,6 +430,7 @@ export function StrategyShell() {
         status={<SyncStatus />}
         onRefresh={() => queryClient.refetchQueries({ type: 'active' })}
         onLogs={() => void navigate({ to: '/logs' })}
+        onSchedules={() => void navigate({ to: '/schedules' })}
         nav={
           <>
             <TradesSection />
@@ -371,6 +438,7 @@ export function StrategyShell() {
             <WatchlistSection />
             <PortfolioSection />
             <SymbolsSection />
+            <PostsSection />
             <LogsSection />
           </>
         }

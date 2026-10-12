@@ -32,6 +32,12 @@
     "LIVE_CACHE_TTL_MS": "2000"
   },
 
+  // Every minute: runs each person's due schedules (Check X, Prune old posts).
+  "triggers": { "crons": ["* * * * *"] },
+
+  // Workers AI: tags X posts with their symbols, sentiment and macro theme (Clef-flash).
+  "ai": { "binding": "AI" },
+
   // Every person's data, sealed with VAULT_KEK when it is set. Created on the first deploy.
   "d1_databases": [
     { "binding": "DB", "database_name": "tradeedge", "migrations_dir": "migrations" }

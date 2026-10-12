@@ -122,6 +122,24 @@ const logView = createRoute({
   component: lazyRouteComponent(() => import('@/routes/logs'), 'LogViewPage'),
 });
 
+const postsView = createRoute({
+  getParentRoute: () => root,
+  path: '/posts/$id',
+  component: lazyRouteComponent(() => import('@/routes/posts'), 'PostsAppViewPage'),
+});
+
+const postView = createRoute({
+  getParentRoute: () => root,
+  path: '/posts/views/$domain/$id',
+  component: lazyRouteComponent(() => import('@/routes/posts'), 'PostViewPage'),
+});
+
+const schedules = createRoute({
+  getParentRoute: () => root,
+  path: '/schedules',
+  component: lazyRouteComponent(() => import('@/routes/schedules'), 'SchedulesPage'),
+});
+
 const routeTree = root.addChildren([
   index,
   board,
@@ -138,6 +156,9 @@ const routeTree = root.addChildren([
   symbolView,
   logs,
   logView,
+  postsView,
+  postView,
+  schedules,
 ]);
 
 export const router = createRouter({

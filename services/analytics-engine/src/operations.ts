@@ -414,6 +414,9 @@ export const SERVER_INSTRUCTIONS =
   'your own Alpaca key. ' +
   "Robinhood's agentic-trading sign-in is connected by a person in the app (Settings > Integrations); " +
   'integration_list shows it with the Agentic account it can trade in. ' +
+  'X posts: integration_write {provider: "x", api_key, handles} stores your own twitterapi.io key ' +
+  '(you pay twitterapi.io) and the X accounts to track; post_list then reads their posts, tagged ' +
+  'with symbols, a macro theme and sentiment, e.g. post_list {symbol: "NVDA", hours: 48}. ' +
   'Track margin cash per account as a position: underlying "MARGIN-CASH", quantity = minus the ' +
   'margin borrowed in USD, avg_cost 1, e.g. {underlying: "MARGIN-CASH", quantity: -12500, avg_cost: 1}; ' +
   'it is always priced at $1, so its value is the debt and it never shows a gain or loss. ' +

@@ -9,6 +9,7 @@ import {
   ScrollTextIcon,
   SettingsIcon,
   SunMoonIcon,
+  TimerIcon,
 } from 'lucide-react';
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { type Desk, type DeskId, appsHere, deskOf } from './desks';
@@ -163,7 +164,11 @@ function ThemeItem() {
   );
 }
 
-function NavUser({ onSettings, onLogs }: { onSettings: () => void; onLogs?: () => void }) {
+function NavUser({
+  onSettings,
+  onLogs,
+  onSchedules,
+}: { onSettings: () => void; onLogs?: () => void; onSchedules?: () => void }) {
   const { isMobile } = useSidebar();
   const who = useIdentity();
   const person = (
@@ -210,6 +215,12 @@ function NavUser({ onSettings, onLogs }: { onSettings: () => void; onLogs?: () =
                   Logs
                 </DropdownMenuItem>
               ) : null}
+              {onSchedules ? (
+                <DropdownMenuItem onSelect={onSchedules}>
+                  <TimerIcon />
+                  Schedules
+                </DropdownMenuItem>
+              ) : null}
               <ThemeItem />
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
@@ -240,6 +251,8 @@ export interface AppShellProps {
   hideAmounts?: boolean;
   /** Opens the desk's Logs page; shows Logs in the profile menu (Bikram, 2026-10-11). */
   onLogs?: () => void;
+  /** Opens the desk's Schedules page; shows Schedules in the profile menu (Bikram, 2026-10-12). */
+  onSchedules?: () => void;
   /** The routed page (usually `<Outlet />`). */
   children: ReactNode;
 }
@@ -265,6 +278,7 @@ export function AppShell({
   onRefresh,
   hideAmounts = false,
   onLogs,
+  onSchedules,
   children,
 }: AppShellProps) {
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null);
@@ -312,7 +326,11 @@ export function AppShell({
             </SidebarHeader>
             <SidebarContent>{nav}</SidebarContent>
             <SidebarFooter>
-              <NavUser onSettings={() => openSettings()} onLogs={onLogs} />
+              <NavUser
+                onSettings={() => openSettings()}
+                onLogs={onLogs}
+                onSchedules={onSchedules}
+              />
             </SidebarFooter>
             <SidebarRail />
           </Sidebar>

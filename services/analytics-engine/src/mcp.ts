@@ -12,6 +12,7 @@ import {
   alpacaKeyShape,
   snaptradeAccountShape,
   snaptradeKeyShape,
+  xShape,
 } from './desks/tradeedge/integrations';
 import {
   type Portfolios,
@@ -24,6 +25,7 @@ import {
   transactionListShape,
   transactionWriteShape,
 } from './desks/tradeedge/portfolio';
+import { type Posts, postListShape } from './desks/tradeedge/posts';
 import { type Screeners, screenerIdSchema, screenerWriteShape } from './desks/tradeedge/screeners';
 import {
   type Strategies,
@@ -95,6 +97,7 @@ export function buildMcpServer(
   if (mine?.watchlist) registerWatchlistTools(server, mine.watchlist, mine.owner);
   if (mine?.tags) registerTagTools(server, mine.tags, mine.owner);
   if (mine?.symbols) registerSymbolTools(server, mine.symbols, mine.owner);
+  if (mine?.posts) registerPostTools(server, mine.posts, mine.owner);
   if (feedback) registerFeedbackTools(server, feedback.feedback, feedback.owner, 'trade');
   if (customViews) registerCustomViewTools(server, customViews.views, customViews.owner, 'trade');
   return server;
@@ -109,6 +112,25 @@ export interface McpMine {
   watchlist?: Watchlist;
   tags?: HoldingTags;
   symbols?: SymbolFactsService;
+  posts?: Posts;
+}
+
+function registerPostTools(server: McpServer, posts: Posts, owner: string) {
+  server.registerTool(
+    'post_list',
+    {
+      title: 'X posts',
+      description:
+        'Posts by the X accounts you track (Settings > Integrations > X), newest first, each tagged ' +
+        'with symbols (tickers it is about), a macro theme with theme_conf, and sentiment from -1 ' +
+        '(very bearish) to +1 (very bullish) with sentiment_conf; null where it was not tagged. ' +
+        'Checked every 2 min in market hours and every 4 h outside (Schedules in the app). Filter ' +
+        'by symbol, handle or theme; hours looks back (24 by default). Returns {store, posts}: ' +
+        'store d1 keeps 30 days, dataedge keeps them for good.',
+      inputSchema: postListShape,
+    },
+    async (q) => json({ store: posts.store, posts: await posts.list(owner, q) }),
+  );
 }
 
 const SYMBOL_READ_DOC =
@@ -528,7 +550,9 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
         'live from SnapTrade: each with broken (its login needs signing in again, in the app) and ' +
         'its accounts: id, name, number, import (false = left out of Holdings), tax_type, ' +
         'portfolio_id once synced, trading {via: snaptrade | robinhood | null (read-only), note} and ' +
-        'trade (the person lets TradeEdge send orders there; set in the app only). alpaca: connected and the key id masked. robinhood: connected ' +
+        'trade (the person lets TradeEdge send orders there; set in the app only). alpaca: connected and the key id masked. ' +
+        'x: connected, the twitterapi.io key masked, handles (tracked accounts), credit {usd, paid, ' +
+        'bonus} at the last test, last_check {at, ok, posts, error}. robinhood: connected ' +
         '(signed in from the app, Settings > Integrations), connected_at and last_test: the Agentic ' +
         "account masked and approvals (true = each order waits for the person's tap in Robinhood's app).",
       inputSchema: {},
@@ -545,9 +569,13 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
         'dashboard.snaptrade.com after turning on two-factor sign-in). Brokers are then linked by a ' +
         'person in the app (Settings > Brokers and accounts > Add broker), never here. alpaca: ' +
         '{provider: "alpaca", key_id, secret_key}; live quotes and option chains then use your key ' +
-        "instead of EdgeDesk's. Returns integration_list.",
+        'instead of EdgeDesk\'s. x: {provider: "x", api_key?, handles?}: your twitterapi.io key ' +
+        '(you pay twitterapi.io directly) and/or the X accounts to track (replaces the list); ' +
+        'posts then show in post_list. Returns integration_list.',
       inputSchema: {
-        provider: z.enum(['snaptrade', 'alpaca']),
+        provider: z.enum(['snaptrade', 'alpaca', 'x']),
+        api_key: xShape.api_key,
+        handles: xShape.handles,
         client_id: snaptradeKeyShape.client_id.optional(),
         consumer_key: snaptradeKeyShape.consumer_key.optional(),
         key_id: alpacaKeyShape.key_id.optional(),
@@ -555,6 +583,10 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
       },
     },
     async (input) => {
+      if (input.provider === 'x')
+        return json(
+          await integrations.saveX(owner, { api_key: input.api_key, handles: input.handles }),
+        );
       if (input.provider === 'snaptrade') {
         if (!input.client_id || !input.consumer_key)
           throw new Error('snaptrade needs client_id and consumer_key');
@@ -581,11 +613,13 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
       description:
         'Delete your key for an integration. snaptrade: syncing stops; accounts already synced stay ' +
         "in Holdings. alpaca: live data goes back to EdgeDesk's key. robinhood: its sign-in is " +
-        'deleted; connecting again is done in the app.',
-      inputSchema: { provider: z.enum(['snaptrade', 'alpaca', 'robinhood']) },
+        'deleted; connecting again is done in the app. x: the key and tracked accounts are ' +
+        'deleted and checks stop.',
+      inputSchema: { provider: z.enum(['snaptrade', 'alpaca', 'robinhood', 'x']) },
     },
     async ({ provider }) => {
-      if (provider === 'snaptrade') await integrations.deleteSnapTrade(owner);
+      if (provider === 'x') await integrations.deleteX(owner);
+      else if (provider === 'snaptrade') await integrations.deleteSnapTrade(owner);
       else if (provider === 'alpaca') await integrations.deleteAlpaca(owner);
       else await integrations.deleteRobinhood(owner);
       return json({ ok: true });
@@ -638,6 +672,8 @@ export interface McpAuth {
   customViews?: CustomViews;
   /** symbol_read. Omitted → not registered. */
   symbols?: SymbolFactsService;
+  /** post_list. Omitted → not registered. */
+  posts?: Posts;
 }
 
 export function mcpRoutes(market: MarketService, auth: McpAuth = {}, ctx?: OpContext) {
@@ -678,6 +714,7 @@ export function mcpRoutes(market: MarketService, auth: McpAuth = {}, ctx?: OpCon
       watchlist: auth.watchlist,
       tags: auth.tags,
       symbols: auth.symbols,
+      posts: auth.posts,
     };
     const feedback = auth.feedback
       ? { feedback: auth.feedback, owner: feedbackOwner(c.get('identity')) }

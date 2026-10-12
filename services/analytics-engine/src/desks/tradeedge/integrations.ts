@@ -9,6 +9,8 @@
  *   alpaca     the person's market-data key; live quotes and chains use it instead of EdgeDesk's.
  *   robinhood  OAuth tokens for Robinhood's agentic-trading MCP (Bikram, 2026-10-12), signed in from the
  *              app only, plus the Agentic account and its trade-approval setting from the last test.
+ *   x          the person's twitterapi.io key and the X accounts they track (Bikram, 2026-10-12), the
+ *              key's credit at the last test, and where the last check left off (posts.ts).
  *   ntfy       Notifications (Bikram, 2026-10-12): the person's own unguessable ntfy.sh topic, which their
  *              phone's ntfy app subscribes to.
  *   webhooks   the person's own URLs that get each event as JSON (Bikram, 2026-10-12), any number.
@@ -46,9 +48,10 @@ import {
   mapPositions,
   verifyHook,
 } from './snaptrade';
+import { TwitterApiClient, type XCredit, XError, normalizeHandle } from './x';
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
-export type Provider = 'snaptrade' | 'alpaca' | 'robinhood' | 'ntfy' | 'webhooks' | 'events';
+export type Provider = 'snaptrade' | 'alpaca' | 'robinhood' | 'x' | 'ntfy' | 'webhooks' | 'events';
 
 export interface SyncReport {
   at: string;
@@ -108,9 +111,32 @@ interface RobinhoodDoc {
     error: string | null;
   } | null;
 }
+/** The last check for new posts (a schedule or Run now). */
+export interface XCheck {
+  at: string;
+  ok: boolean;
+  /** New posts stored. */
+  posts: number;
+  error: string | null;
+}
+interface XDoc {
+  api_key: string;
+  /** Tracked accounts, lowercase, without @. */
+  handles: string[];
+  saved_at: string;
+  last_test?: KeyTest | null;
+  credit?: XCredit | null;
+  /** Where the next check starts: the newest post's time (unix seconds) and the ids posted that second. */
+  since?: number | null;
+  since_ids?: string[];
+  last_check?: XCheck | null;
+}
 interface NtfyDoc {
   /** The topic's name on ntfy.sh: whoever knows it can read it, so it is random and sealed. */
   topic: string;
+  /** The person's own ntfy.sh access token (Bikram, 2026-10-12): sends count against their account, not
+   *  the shared Cloudflare address ntfy.sh limits anonymous sends from. */
+  token?: string | null;
   created_at: string;
   last_test: KeyTest | null;
 }
@@ -132,6 +158,7 @@ interface Docs {
   snaptrade: SnapTradeDoc;
   alpaca: AlpacaDoc;
   robinhood: RobinhoodDoc;
+  x: XDoc;
   ntfy: NtfyDoc;
   webhooks: WebhooksDoc;
   events: EventsDoc;
@@ -230,6 +257,14 @@ export const alpacaKeyShape = {
   key_id: z.string().trim().min(1).max(200).describe('Alpaca API key ID.'),
   secret_key: z.string().trim().min(1).max(400).describe('Alpaca secret key.'),
 };
+export const xShape = {
+  api_key: z.string().trim().min(8).max(200).optional().describe('Your twitterapi.io API key.'),
+  handles: z
+    .array(z.string().trim().min(1).max(100))
+    .max(200)
+    .optional()
+    .describe('X accounts to track (handle, @handle or x.com link); replaces the list.'),
+};
 export const snaptradeAccountShape = {
   account_id: z
     .string()
@@ -300,6 +335,9 @@ export class Integrations {
       fetch?: FetchFn;
     },
   ) {}
+
+  /** Told when a person connects or disconnects X, so their X schedules start or stop (schedules.ts). */
+  onXChange?: (owner: string, connected: boolean) => Promise<void>;
 
   // ── the sealed rows ──
 
@@ -374,15 +412,27 @@ export class Integrations {
    * false skips SnapTrade (the header's sync status reads only what is stored).
    */
   async status(owner: string, live = true) {
-    const [st, alp, rh, nt, wh, ev] = await Promise.all([
+    const [st, alp, rh, x, nt, wh, ev] = await Promise.all([
       this.get(owner, 'snaptrade'),
       this.get(owner, 'alpaca'),
       this.get(owner, 'robinhood'),
+      this.get(owner, 'x'),
       this.get(owner, 'ntfy'),
       this.get(owner, 'webhooks'),
       this.get(owner, 'events'),
     ]);
     return {
+      x: x
+        ? {
+            connected: true as const,
+            api_key: hint(x.api_key),
+            handles: x.handles,
+            saved_at: x.saved_at,
+            credit: x.credit ?? null,
+            last_test: x.last_test ?? null,
+            last_check: x.last_check ?? null,
+          }
+        : { connected: false as const },
       webhooks: (wh?.hooks ?? []).map((h) => ({
         id: h.id,
         name: h.name,
@@ -400,6 +450,7 @@ export class Integrations {
             connected: true as const,
             server: NTFY_SERVER,
             topic: nt.topic,
+            token: nt.token ? hint(nt.token) : null,
             created_at: nt.created_at,
             last_test: nt.last_test,
           }
@@ -529,7 +580,7 @@ export class Integrations {
 
   private async noteTest(
     owner: string,
-    category: 'snaptrade' | 'user',
+    category: 'snaptrade' | 'user' | 'x',
     what: string,
     result: KeyTest,
     t0: number,
@@ -854,6 +905,125 @@ export class Integrations {
     return market;
   }
 
+  // ── X (twitterapi.io) ──
+
+  /**
+   * Stores the person's twitterapi.io key (checked by reading its credit first) and/or the accounts
+   * they track. A new list starts reading from now, so a long-tracked account isn't read back.
+   */
+  async saveX(owner: string, input: { api_key?: string; handles?: string[] }) {
+    const prev = await this.get(owner, 'x');
+    const key = input.api_key ?? prev?.api_key;
+    if (!key) throw new IntegrationInvalid('Add your twitterapi.io API key first.');
+    let handles = prev?.handles ?? [];
+    if (input.handles) {
+      const bad = input.handles.filter((h) => !normalizeHandle(h));
+      if (bad.length)
+        throw new IntegrationInvalid(`Not an X account: ${bad.slice(0, 3).join(', ')}`);
+      handles = [...new Set(input.handles.map((h) => normalizeHandle(h) as string))];
+    }
+    let test: KeyTest | null | undefined = prev?.last_test;
+    let credit = prev?.credit ?? null;
+    if (input.api_key) {
+      try {
+        credit = await new TwitterApiClient(key, this.opts.fetch).credit();
+        test = passed(`Credit $${credit.usd.toFixed(2)}`);
+      } catch (err) {
+        if (err instanceof XError && err.status < 500)
+          throw new IntegrationInvalid(
+            'twitterapi.io rejected this key. Copy it again from twitterapi.io and retry.',
+          );
+        throw err;
+      }
+    }
+    const added = handles.filter((h) => !prev?.handles.includes(h));
+    if (added.length) await this.checkHandles(owner, key, added);
+    await this.update(owner, 'x', () => ({
+      api_key: key,
+      handles,
+      saved_at: input.api_key
+        ? new Date().toISOString()
+        : (prev?.saved_at ?? new Date().toISOString()),
+      last_test: test ?? null,
+      credit,
+      // Newly added accounts are read from now on; the first check reads the last hour.
+      since: added.length && prev?.since ? Math.floor(Date.now() / 1000) : (prev?.since ?? null),
+      since_ids: added.length ? [] : (prev?.since_ids ?? []),
+      last_check: prev?.last_check ?? null,
+    }));
+    if (!prev) await this.onXChange?.(owner, true);
+    return this.status(owner, false);
+  }
+
+  /**
+   * Looks each newly added account up once (Bikram, 2026-10-12: a few credits so checks never poll a
+   * dead account) and refuses the save when one is missing or suspended.
+   */
+  private async checkHandles(owner: string, key: string, handles: string[]) {
+    const t0 = performance.now();
+    const client = new TwitterApiClient(key, this.opts.fetch);
+    const missing: string[] = [];
+    let error: string | undefined;
+    try {
+      // One at a time: free-tier keys allow one request every 5 seconds.
+      for (const h of handles) if (!(await client.userExists(h))) missing.push(h);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+    const n = handles.length;
+    await this.opts.logs?.note(owner, {
+      category: 'x',
+      what: `Check ${n} new account${n === 1 ? '' : 's'} (${client.calls} call${client.calls === 1 ? '' : 's'})`,
+      ok: !error && !missing.length,
+      ms: performance.now() - t0,
+      detail: error ?? (missing.length ? `Not found: @${missing.join(', @')}` : undefined),
+    });
+    if (error)
+      throw new IntegrationInvalid(`Couldn't check the accounts on twitterapi.io: ${error}`);
+    if (missing.length)
+      throw new IntegrationInvalid(
+        `No X account ${missing.map((h) => `@${h}`).join(', ')} (missing or suspended).`,
+      );
+  }
+
+  /** Tests the saved key with one read (its credit) and keeps the result and the credit. */
+  async xTest(owner: string) {
+    const doc = await this.get(owner, 'x');
+    if (!doc)
+      throw new IntegrationNotConnected('X is not connected: add your twitterapi.io key first.');
+    const t0 = performance.now();
+    let result: KeyTest;
+    let credit: XCredit | null = doc.credit ?? null;
+    try {
+      credit = await new TwitterApiClient(doc.api_key, this.opts.fetch).credit();
+      result = passed(`Credit $${credit.usd.toFixed(2)}`);
+    } catch (err) {
+      result = failed(err);
+    }
+    await this.update(owner, 'x', (p) => (p ? { ...p, last_test: result, credit } : p));
+    await this.noteTest(owner, 'x', 'Test: twitterapi.io credit (1 call)', result, t0);
+    return this.status(owner, false);
+  }
+
+  async deleteX(owner: string) {
+    await this.update(owner, 'x', () => null);
+    await this.onXChange?.(owner, false);
+  }
+
+  /** The person's X key, accounts and where the last check left off; null when X is not connected. */
+  xDoc(owner: string) {
+    return this.get(owner, 'x');
+  }
+
+  /** Records a check: where the next one starts and how this one went. */
+  async xChecked(
+    owner: string,
+    check: XCheck,
+    since?: { since: number; since_ids: string[] },
+  ): Promise<void> {
+    await this.update(owner, 'x', (p) => (p ? { ...p, ...(since ?? {}), last_check: check } : p));
+  }
+
   // ── Robinhood ──
 
   private async robinhood(owner: string) {
@@ -1042,10 +1212,20 @@ export class Integrations {
     return this.status(owner, false);
   }
 
-  private async publish(topic: string, n: Notice) {
-    const res = await (this.opts.fetch ?? fetch)(`${NTFY_SERVER}/${topic}`, {
+  /** Saves the person's ntfy access token (sealed); the next Test shows whether it works. */
+  async ntfyToken(owner: string, token: string) {
+    const doc = await this.get(owner, 'ntfy');
+    if (!doc) throw new IntegrationNotConnected('Notifications are off: turn them on first.');
+    await this.update(owner, 'ntfy', (p) => (p ? { ...p, token, last_test: null } : p));
+    await this.opts.logs?.note(owner, { category: 'user', what: 'ntfy token saved', ok: true });
+    return this.status(owner, false);
+  }
+
+  private async publish(doc: NtfyDoc, n: Notice) {
+    const res = await (this.opts.fetch ?? fetch)(`${NTFY_SERVER}/${doc.topic}`, {
       method: 'POST',
       headers: {
+        ...(doc.token ? { Authorization: `Bearer ${doc.token}` } : {}),
         Title: n.title,
         Tags: 'chart_with_upwards_trend',
         ...(n.click ? { Click: n.click } : {}),
@@ -1073,8 +1253,7 @@ export class Integrations {
     ]);
     const off = new Set(ev?.off[event] ?? []);
     const sends: { target: string; send: () => Promise<void> }[] = [];
-    if (nt && !off.has('ntfy'))
-      sends.push({ target: 'ntfy', send: () => this.publish(nt.topic, n) });
+    if (nt && !off.has('ntfy')) sends.push({ target: 'ntfy', send: () => this.publish(nt, n) });
     for (const h of wh?.hooks ?? [])
       if (!off.has(h.id)) sends.push({ target: h.name, send: () => this.post(h, event, n) });
     await Promise.all(
@@ -1100,7 +1279,7 @@ export class Integrations {
     const t0 = performance.now();
     let result: KeyTest;
     try {
-      await this.publish(doc.topic, {
+      await this.publish(doc, {
         title: 'TradeEdge test',
         message: 'Notifications work. You will hear from TradeEdge here.',
       });
@@ -1280,7 +1459,7 @@ export function integrationRoutes(svc: Integrations) {
   r.onError((err, c) => {
     if (err instanceof IntegrationInvalid) return c.json({ error: err.message }, 400);
     if (err instanceof IntegrationNotConnected) return c.json({ error: err.message }, 409);
-    if (err instanceof SnapTradeError || err instanceof RobinhoodError)
+    if (err instanceof SnapTradeError || err instanceof RobinhoodError || err instanceof XError)
       return c.json({ error: err.message }, 502);
     throw err;
   });
@@ -1378,8 +1557,23 @@ export function integrationRoutes(svc: Integrations) {
       }),
     );
   });
+  r.put('/x', async (c) => {
+    const p = await parse(c, xShape);
+    if (!p.success) return c.json(invalid(p.error.issues), 400);
+    return c.json(await svc.saveX(owner(c), p.data));
+  });
+  r.post('/x/test', async (c) => c.json(await svc.xTest(owner(c))));
+  r.delete('/x', async (c) => {
+    await svc.deleteX(owner(c));
+    return c.json({ ok: true });
+  });
   r.post('/robinhood/test', async (c) => c.json(await svc.robinhoodTest(owner(c))));
   r.post('/ntfy', async (c) => c.json(await svc.ntfyCreate(owner(c))));
+  r.put('/ntfy/token', async (c) => {
+    const p = await parse(c, { token: z.string().trim().min(1).max(200) });
+    if (!p.success) return c.json(invalid(p.error.issues), 400);
+    return c.json(await svc.ntfyToken(owner(c), p.data.token));
+  });
   r.post('/ntfy/test', async (c) => c.json(await svc.ntfyTest(owner(c))));
   r.delete('/ntfy', async (c) => {
     await svc.deleteNtfy(owner(c));

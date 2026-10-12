@@ -27,20 +27,24 @@ import {
   tradeedgeStores,
   underPath,
 } from './desks/tradeedge/app';
+import type { Schedules } from './desks/tradeedge/schedules';
+import type { AiBinding } from './desks/tradeedge/x';
 import { MarketService } from './market';
 import type { RateLimiter } from './ratelimit';
 import { cacheApi } from './shared-cache';
 import { type AssetsFetcher, siteStatic } from './static-worker';
 import { sealPlainRows } from './vault';
 
-type Env = Record<string, string | AssetsFetcher | RateLimiter | D1Like | undefined> & {
+type Env = Record<string, string | AssetsFetcher | RateLimiter | D1Like | AiBinding | undefined> & {
   ASSETS: AssetsFetcher;
   DB?: D1Like;
+  /** Workers AI: tags X posts with their symbols. */
+  AI?: AiBinding;
   API_RATE_LIMITER?: RateLimiter;
   MCP_RATE_LIMITER?: RateLimiter;
 };
 
-let appPromise: Promise<Hono<AppEnv>> | undefined;
+let appPromise: Promise<Hono<AppEnv> & { schedules?: Schedules }> | undefined;
 
 async function createTradeApp(env: Env) {
   const vars: Record<string, string | undefined> = {};
@@ -56,7 +60,8 @@ async function createTradeApp(env: Env) {
   );
   const deps = {
     limiters: { api: env.API_RATE_LIMITER, mcp: env.MCP_RATE_LIMITER },
-    ...tradeedgeStores(cfg, env.DB, market, undefined, true),
+    // No DataEdge here: X posts stay in D1, sealed, 30 days.
+    ...tradeedgeStores(cfg, env.DB, market, undefined, true, { ai: env.AI }),
   };
   if (env.DB && deps.vault) await sealPlainRows(env.DB, deps.vault);
 
@@ -88,17 +93,26 @@ async function createTradeApp(env: Env) {
   site.notFound((c) => c.json({ error: 'not found' }, 404));
   app.all('*', (c) => site.fetch(c.req.raw));
   app.notFound((c) => c.json({ error: 'not found' }, 404));
-  return app;
+  return Object.assign(app, { schedules: deps.schedules });
+}
+
+function getApp(env: Env) {
+  appPromise ??= createTradeApp(env);
+  // Don't pin a failed init for the isolate's lifetime.
+  appPromise.catch(() => {
+    appPromise = undefined;
+  });
+  return appPromise;
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    appPromise ??= createTradeApp(env);
-    // Don't pin a failed init for the isolate's lifetime.
-    appPromise.catch(() => {
-      appPromise = undefined;
-    });
     // The context lets a route finish work after its reply (SnapTrade's webhook re-sync).
-    return (await appPromise).fetch(req, undefined, ctx);
+    return (await getApp(env)).fetch(req, undefined, ctx);
+  },
+  /** Cron Trigger, every minute: runs each person's due schedules (Check X, Prune old posts). */
+  async scheduled(_event: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }) {
+    const app = await getApp(env);
+    if (app.schedules) ctx.waitUntil(app.schedules.runDue());
   },
 };

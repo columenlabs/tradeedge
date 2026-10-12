@@ -27,6 +27,8 @@ import { apiRoutes } from './api';
 import { Integrations, integrationRoutes } from './integrations';
 import { Logs, logRequests, logRoutes } from './logs';
 import { Portfolios, portfolioRoutes } from './portfolio';
+import { type PostArchive, Posts, postRoutes } from './posts';
+import { Schedules, scheduleRoutes } from './schedules';
 import { Screeners, screenerRoutes } from './screeners';
 import { SnapTradeBrokers } from './snaptrade';
 import { Strategies, StrategiesUnavailable, strategyRoutes } from './strategies';
@@ -34,6 +36,7 @@ import { SymbolFactsService, symbolRoutes } from './symbols';
 import { HoldingTags, tagRoutes } from './tags';
 import { Trades, tradeRoutes } from './trades';
 import { Watchlist, watchlistRoutes } from './watchlist';
+import { type AiBinding, PostTagger } from './x';
 
 const VERSION = '0.1.0';
 
@@ -75,6 +78,10 @@ export interface TradeedgeDeps {
   customViews?: CustomViews;
   /** Each person's activity log (D1). Omitted → no `/api/logs` and nothing is logged. */
   logs?: Logs;
+  /** Posts from the X accounts each person tracks. Omitted → no `/api/posts` and no post_list. */
+  posts?: Posts;
+  /** Each person's schedules (D1). Omitted → no `/api/schedules`, and nothing runs on the cron. */
+  schedules?: Schedules;
 }
 
 /**
@@ -88,6 +95,11 @@ export function tradeedgeStores(
   market: MarketService,
   history?: HistoryService,
   encryptionOptional = false,
+  /**
+   * X posts: Workers AI tags symbols (`AI` binding); with DataEdge (the suite) posts go to its
+   * `x_posts` dataset, else to D1.
+   */
+  x: { ai?: AiBinding; archive?: PostArchive } = {},
 ) {
   if (!db) return { vault: undefined };
   const strategies = new Strategies(db);
@@ -104,23 +116,41 @@ export function tradeedgeStores(
     market.splits(s, from),
   );
   const logs = new Logs(db, vault);
+  const integrations = new Integrations(db, vault, portfolios, {
+    hookOrigin: cfg.publicOrigin,
+    portalReturn: `${tradeOrigin(cfg)}/app/?settings=accounts`,
+    market,
+    logs,
+    alpaca: {
+      optionsFeed: cfg.live?.optionsFeed,
+      stockFeed: cfg.live?.stockFeed,
+      dataUrl: cfg.live?.dataUrl,
+      tradingUrl: cfg.live?.tradingUrl,
+    },
+  });
+  const posts = new Posts(db, vault, integrations, new PostTagger(x.ai), {
+    archive: x.archive,
+    logs,
+  });
+  const schedules = new Schedules(
+    db,
+    vault,
+    {
+      x_market: (owner, why) => posts.check(owner, why),
+      x_outside: (owner, why) => posts.check(owner, why),
+      posts_prune: (owner) => posts.prune(owner),
+    },
+    logs,
+  );
+  integrations.onXChange = (owner, connected) => schedules.setX(owner, connected);
   return {
     logs,
     vault,
     strategies,
     portfolios,
-    integrations: new Integrations(db, vault, portfolios, {
-      hookOrigin: cfg.publicOrigin,
-      portalReturn: `${tradeOrigin(cfg)}/app/?settings=accounts`,
-      market,
-      logs,
-      alpaca: {
-        optionsFeed: cfg.live?.optionsFeed,
-        stockFeed: cfg.live?.stockFeed,
-        dataUrl: cfg.live?.dataUrl,
-        tradingUrl: cfg.live?.tradingUrl,
-      },
-    }),
+    integrations,
+    posts,
+    schedules,
     trades: new Trades(db, vault),
     screeners: new Screeners(db, strategies, vault),
     watchlist: new Watchlist(db, vault),
@@ -331,6 +361,8 @@ export function tradeedgeRoutes(
     });
   }
   if (deps.logs) app.route('/api/logs', logRoutes(deps.logs));
+  if (deps.posts) app.route('/api/posts', postRoutes(deps.posts));
+  if (deps.schedules) app.route('/api/schedules', scheduleRoutes(deps.schedules));
   if (deps.portfolios) app.route('/api/portfolios', portfolioRoutes(deps.portfolios));
   if (integrations) app.route('/api/integrations', integrationRoutes(integrations));
   if (deps.trades) app.route('/api/trades', tradeRoutes(deps.trades));
@@ -398,6 +430,7 @@ export function tradeedgeRoutes(
         feedback: deps.feedback,
         customViews: deps.customViews,
         symbols,
+        posts: deps.posts,
       },
       ctx,
     ),
