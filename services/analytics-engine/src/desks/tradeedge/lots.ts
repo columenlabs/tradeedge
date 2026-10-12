@@ -219,7 +219,6 @@ const CHECK_STEP = 0.0001;
 
 /**
  * Every open lot, check and realized gain of one account.
- * `skip` is a symbol left out of the lots and checks (margin cash).
  */
 export function accountLots(a: {
   held: Held[];
@@ -229,7 +228,6 @@ export function accountLots(a: {
   rows: Transaction[];
   costs: LotCost[];
   close: CloseOn;
-  skip: string;
   /** Stock splits of the symbols traded, any order. */
   splits?: StockSplit[];
   today?: Date;
@@ -253,7 +251,7 @@ export function accountLots(a: {
   const stored = group(a.stored ?? []);
   const derived = group(fifo.open);
   // Open lots belong to what is held now; a cash sweep fund has none.
-  const counted = (s: string) => s !== a.skip && !CASH_FUND.test(s);
+  const counted = (s: string) => !CASH_FUND.test(s);
   const symbols = [...held.keys()].filter(counted).sort();
   // An account with neither stored lots nor trades has nothing to check against.
   const checked = (a.stored?.length ?? 0) > 0 || trades.length > 0;

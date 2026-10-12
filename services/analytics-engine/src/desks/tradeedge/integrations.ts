@@ -51,7 +51,15 @@ import {
 import { TwitterApiClient, type XCredit, XError, normalizeHandle } from './x';
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
-export type Provider = 'snaptrade' | 'alpaca' | 'robinhood' | 'x' | 'ntfy' | 'webhooks' | 'events';
+export type Provider =
+  | 'snaptrade'
+  | 'alpaca'
+  | 'robinhood'
+  | 'x'
+  | 'ntfy'
+  | 'email'
+  | 'webhooks'
+  | 'events';
 
 export interface SyncReport {
   at: string;
@@ -140,6 +148,12 @@ interface NtfyDoc {
   created_at: string;
   last_test: KeyTest | null;
 }
+interface EmailDoc {
+  /** The person's sign-in address (Bikram, 2026-10-12: email from EdgeDesk's own sender). */
+  address: string;
+  created_at: string;
+  last_test: KeyTest | null;
+}
 interface Webhook {
   id: string;
   name: string;
@@ -151,7 +165,7 @@ interface WebhooksDoc {
   hooks: Webhook[];
 }
 interface EventsDoc {
-  /** Targets (`ntfy` or a webhook id) each event is turned off for; anything not listed is on. */
+  /** Targets (`ntfy`, `email` or a webhook id) each event is turned off for; anything not listed is on. */
   off: Partial<Record<NotifyEvent, string[]>>;
 }
 interface Docs {
@@ -160,6 +174,7 @@ interface Docs {
   robinhood: RobinhoodDoc;
   x: XDoc;
   ntfy: NtfyDoc;
+  email: EmailDoc;
   webhooks: WebhooksDoc;
   events: EventsDoc;
 }
@@ -202,6 +217,8 @@ export interface Notice {
   message: string;
   click?: string;
 }
+/** Sends one notification email (the suite's Email Service binding); absent → no Email row. */
+export type SendNotice = (to: string, n: Notice) => Promise<void>;
 
 const passed = (detail: string): KeyTest => ({
   at: new Date().toISOString(),
@@ -332,6 +349,8 @@ export class Integrations {
       alpaca: Omit<AlpacaConfig, 'keyId' | 'secretKey'>;
       /** Each person's Logs: SnapTrade syncs, webhook events and key changes. */
       logs?: Logs;
+      /** Notification email; omitted where the host has no email sender (self-host). */
+      mail?: SendNotice;
       fetch?: FetchFn;
     },
   ) {}
@@ -412,16 +431,26 @@ export class Integrations {
    * false skips SnapTrade (the header's sync status reads only what is stored).
    */
   async status(owner: string, live = true) {
-    const [st, alp, rh, x, nt, wh, ev] = await Promise.all([
+    const [st, alp, rh, x, nt, em, wh, ev] = await Promise.all([
       this.get(owner, 'snaptrade'),
       this.get(owner, 'alpaca'),
       this.get(owner, 'robinhood'),
       this.get(owner, 'x'),
       this.get(owner, 'ntfy'),
+      this.get(owner, 'email'),
       this.get(owner, 'webhooks'),
       this.get(owner, 'events'),
     ]);
     return {
+      email: em
+        ? {
+            available: !!this.opts.mail,
+            connected: true as const,
+            address: em.address,
+            created_at: em.created_at,
+            last_test: em.last_test,
+          }
+        : { available: !!this.opts.mail, connected: false as const },
       x: x
         ? {
             connected: true as const,
@@ -779,7 +808,7 @@ export class Integrations {
       if ((r.data ?? []).length < 1000) break;
     }
     const { positions, lots, skipped } = mapPositions(pos.results ?? []);
-    const { cash, margin } = mapCash(balances);
+    const cash = mapCash(balances);
     const transactions = mapActivities(activities);
     await this.portfolios.syncAccount(owner, {
       snaptrade_account_id: a.id,
@@ -787,7 +816,7 @@ export class Integrations {
       tax_type: taxType ?? guessTaxType(a),
       broker: a.institution_name,
       cash,
-      positions: margin ? [...positions, margin] : positions,
+      positions,
       lots,
       transactions,
     });
@@ -1246,14 +1275,18 @@ export class Integrations {
 
   /** Sends one event to every target it is on for; a failure is logged, never thrown. */
   async notify(owner: string, event: NotifyEvent, n: Notice) {
-    const [nt, wh, ev] = await Promise.all([
+    const [nt, em, wh, ev] = await Promise.all([
       this.get(owner, 'ntfy'),
+      this.get(owner, 'email'),
       this.get(owner, 'webhooks'),
       this.get(owner, 'events'),
     ]);
     const off = new Set(ev?.off[event] ?? []);
     const sends: { target: string; send: () => Promise<void> }[] = [];
     if (nt && !off.has('ntfy')) sends.push({ target: 'ntfy', send: () => this.publish(nt, n) });
+    const mail = this.opts.mail;
+    if (em && mail && !off.has('email'))
+      sends.push({ target: 'email', send: () => mail(em.address, n) });
     for (const h of wh?.hooks ?? [])
       if (!off.has(h.id)) sends.push({ target: h.name, send: () => this.post(h, event, n) });
     await Promise.all(
@@ -1295,6 +1328,51 @@ export class Integrations {
   async deleteNtfy(owner: string) {
     await this.update(owner, 'ntfy', () => null);
     await this.dropTarget(owner, 'ntfy');
+  }
+
+  // ── Notifications (email) ──
+
+  /** Turns on email to the person's sign-in address. */
+  async emailCreate(owner: string, address: string) {
+    if (!this.opts.mail) throw new IntegrationInvalid('Email is not set up on this server.');
+    await this.update(owner, 'email', () => ({
+      address,
+      created_at: new Date().toISOString(),
+      last_test: null,
+    }));
+    await this.opts.logs?.note(owner, {
+      category: 'user',
+      what: 'Email notifications on',
+      ok: true,
+    });
+    return this.status(owner, false);
+  }
+
+  /** Sends a test email and keeps the result. */
+  async emailTest(owner: string) {
+    const doc = await this.get(owner, 'email');
+    if (!doc) throw new IntegrationNotConnected('Email notifications are off: turn them on first.');
+    const mail = this.opts.mail;
+    if (!mail) throw new IntegrationInvalid('Email is not set up on this server.');
+    const t0 = performance.now();
+    let result: KeyTest;
+    try {
+      await mail(doc.address, {
+        title: 'TradeEdge test',
+        message: 'Notifications work. You will hear from TradeEdge at this address.',
+      });
+      result = passed('email sent');
+    } catch (err) {
+      result = failed(err);
+    }
+    await this.update(owner, 'email', (p) => (p ? { ...p, last_test: result } : p));
+    await this.noteTest(owner, 'user', 'Email test', result, t0);
+    return this.status(owner, false);
+  }
+
+  async deleteEmail(owner: string) {
+    await this.update(owner, 'email', () => null);
+    await this.dropTarget(owner, 'email');
   }
 
   // ── Webhooks ──
@@ -1356,7 +1434,7 @@ export class Integrations {
 
   // ── Events ──
 
-  /** Turns one event on or off for one target (`ntfy` or a webhook id). */
+  /** Turns one event on or off for one target (`ntfy`, `email` or a webhook id). */
   async setEvent(owner: string, event: NotifyEvent, target: string, on: boolean) {
     await this.update(owner, 'events', (prev) => {
       const off = { ...(prev?.off ?? {}) };
@@ -1577,6 +1655,18 @@ export function integrationRoutes(svc: Integrations) {
   r.post('/ntfy/test', async (c) => c.json(await svc.ntfyTest(owner(c))));
   r.delete('/ntfy', async (c) => {
     await svc.deleteNtfy(owner(c));
+    return c.json({ ok: true });
+  });
+  // Email goes only to the signed-in person's own address, turned on by them in the app.
+  r.post('/email', async (c) => {
+    const who = c.get('identity');
+    if (who?.serviceToken || !who?.email)
+      return c.json({ error: 'Email goes to your sign-in address: turn it on in the app.' }, 403);
+    return c.json(await svc.emailCreate(owner(c), who.email));
+  });
+  r.post('/email/test', async (c) => c.json(await svc.emailTest(owner(c))));
+  r.delete('/email', async (c) => {
+    await svc.deleteEmail(owner(c));
     return c.json({ ok: true });
   });
   r.post('/webhooks', async (c) => {

@@ -565,6 +565,7 @@ export interface IntegrationsStatus {
   robinhood: RobinhoodStatus;
   x: XStatus;
   ntfy: NtfyStatus;
+  email: EmailStatus;
   webhooks: WebhookTarget[];
   events: NotifyEventStatus[];
 }
@@ -594,7 +595,7 @@ export interface WebhookTarget {
   created_at: string;
   last_test: KeyTest | null;
 }
-/** One event and the targets (`ntfy` or a webhook id) it is turned off for. */
+/** One event and the targets (`ntfy`, `email` or a webhook id) it is turned off for. */
 export interface NotifyEventStatus {
   key: string;
   label: string;
@@ -610,6 +611,16 @@ export type NtfyStatus =
       topic: string;
       /** The person's ntfy.sh access token, masked; null until they add one. */
       token: string | null;
+      created_at: string;
+      last_test: KeyTest | null;
+    };
+/** Email notifications to the person's sign-in address; `available` false where the server can't send email. */
+export type EmailStatus =
+  | { available: boolean; connected: false }
+  | {
+      available: boolean;
+      connected: true;
+      address: string;
       created_at: string;
       last_test: KeyTest | null;
     };
@@ -801,6 +812,10 @@ export const saveNtfyToken = (token: string) =>
 export const testNtfy = () =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/ntfy/test', {});
 export const deleteNtfy = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/ntfy');
+export const createEmail = () => send<IntegrationsStatus>('POST', '/api/v1/integrations/email', {});
+export const testEmail = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/email/test', {});
+export const deleteEmail = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/email');
 export const addWebhook = (hook: { name: string; url: string }) =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/webhooks', hook);
 export const testWebhook = (id: string) =>

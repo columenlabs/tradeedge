@@ -414,9 +414,8 @@ function registerPortfolioTools(
         'kind cost when no_cost shares, open or sold, have no cost on record. Money market funds ' +
         '(FDRXX, SPAXX) are cash and have no lots. dividends lists, per symbol, the dividends paid ' +
         '(total on record, ytd this year). For a quantity check in a manual account, send the missing ' +
-        'lots; in a SnapTrade account, run integration_sync. A MARGIN-CASH position is the margin ' +
-        'borrowed in that account (quantity = minus the USD balance, priced at $1; see portfolio_write). ' +
-        'Each position carries its sector (set ' +
+        'lots; in a SnapTrade account, run integration_sync. cash is signed: negative is margin ' +
+        'borrowed in that account. Each position carries its sector (set ' +
         'with sector_write) and basket (set with basket_write), null when unset.',
       inputSchema: { id: portfolioIdSchema },
     },
@@ -441,11 +440,8 @@ function registerPortfolioTools(
         'broker SnapTrade supports is refused (link it in the app instead). A synced account ' +
         '(source snaptrade) is refused: it changes only through integration_sync. Stock: ' +
         'underlying + quantity. Option: also expiration (YYYYMMDD), strike and right (C or P). ' +
-        'Transactions are kept; send them with portfolio_transaction_write. Margin cash: track money ' +
-        'borrowed on margin in each account as a stock position with underlying "MARGIN-CASH", ' +
-        'quantity = minus the margin balance in USD and avg_cost 1. It is always priced at $1, so its ' +
-        'market value is the debt and its P&L is 0. Example, $12,500 borrowed: {underlying: ' +
-        '"MARGIN-CASH", quantity: -12500, avg_cost: 1}. Keep cash for the positive cash balance.',
+        'Transactions are kept; send them with portfolio_transaction_write. cash is the USD balance, ' +
+        'signed: negative is margin borrowed, e.g. cash: -12500 for $12,500 borrowed.',
       inputSchema: portfolioWriteShape,
     },
     async (input) => json(await portfolios.write(owner, input)),
@@ -630,8 +626,8 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
     {
       title: 'Sync SnapTrade',
       description:
-        'Pull every included SnapTrade account into Holdings now: positions, cash (a negative ' +
-        "balance becomes MARGIN-CASH), the broker's tax lots and transactions. SnapTrade itself " +
+        'Pull every included SnapTrade account into Holdings now: positions, cash (negative is ' +
+        "margin borrowed), the broker's tax lots and transactions. SnapTrade itself " +
         'refreshes from the brokers about once a day, and its webhook syncs on each change. Returns ' +
         'the counts, positions Holdings cannot hold (bonds, futures) and any errors.',
       inputSchema: {},

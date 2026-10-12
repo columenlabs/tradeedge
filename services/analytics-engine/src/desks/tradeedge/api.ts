@@ -9,7 +9,7 @@ import { OPERATIONS, type OpContext } from '../../operations';
 import { LegNotFound } from '../../screener';
 import { parseExpiration, parseNum, parseSymbol, parseType } from '../../validate';
 import type { Integrations } from './integrations';
-import { MARGIN_CASH, portfolioOwner } from './portfolio';
+import { portfolioOwner } from './portfolio';
 import { ScreenerInvalid, ScreenerNotFound } from './screeners';
 import { StrategyNotFound } from './strategies';
 
@@ -53,7 +53,7 @@ export function apiRoutes(market: MarketService, ctx: OpContext, integrations?: 
 
   /** Latest quotes for many symbols in one request (Holdings), `?symbols=A,B,...`: tickers, or OCC
    *  symbols for option contracts. A fund the feed has no quote for (ARKVX) gets its daily NAV from
-   *  ClickHouse. MARGIN-CASH (margin borrowed, see `portfolio_write`) is always $1, without the feed.
+   *  ClickHouse.
    *  A symbol that is not a valid ticker or OCC symbol comes back null and the rest still price. A
    *  symbol whose quote fails keeps its last price and is listed in `stale` (null when there never
    *  was one). The AppShell's Refresh header (`REFRESH_HEADER`) skips the quote cache. REST only. */
@@ -62,10 +62,7 @@ export function apiRoutes(market: MarketService, ctx: OpContext, integrations?: 
     if (raw.length === 0 || raw.length > 200) {
       return c.json({ error: 'symbols: 1 to 200 comma-separated tickers or OCC symbols' }, 400);
     }
-    const margin = raw.some((s) => s.toUpperCase() === MARGIN_CASH);
-    const parsed = raw
-      .filter((s) => s.toUpperCase() !== MARGIN_CASH)
-      .map((s) => ({ raw: s, symbol: parseOccSymbol(s) ? s : parseSymbol(s) }));
+    const parsed = raw.map((s) => ({ raw: s, symbol: parseOccSymbol(s) ? s : parseSymbol(s) }));
     const symbols = [...new Set(parsed.flatMap((p) => (p.symbol ? [p.symbol] : [])))];
     const fresh = Boolean(c.req.header(REFRESH_HEADER));
     const live = await marketOf(c);
@@ -73,18 +70,6 @@ export function apiRoutes(market: MarketService, ctx: OpContext, integrations?: 
       ? await live.quotes(symbols, fresh, (t) => ctx.history.fundNavs(t))
       : { quotes: {}, stale: [] };
     for (const p of parsed) if (!p.symbol) out.quotes[p.raw] = null;
-    if (margin) {
-      out.quotes[MARGIN_CASH] = {
-        symbol: MARGIN_CASH,
-        last: 1,
-        bid: 1,
-        ask: 1,
-        prevClose: 1,
-        change: 0,
-        changePct: 0,
-        time: new Date().toISOString(),
-      };
-    }
     return c.json(out);
   });
 

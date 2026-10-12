@@ -24,7 +24,7 @@ import { Vault } from '../../vault';
 import { customViewRoutes } from '../../views/custom-views';
 import { CustomViews } from '../../views/store';
 import { apiRoutes } from './api';
-import { Integrations, integrationRoutes } from './integrations';
+import { Integrations, type SendNotice, integrationRoutes } from './integrations';
 import { Logs, logRequests, logRoutes } from './logs';
 import { Portfolios, portfolioRoutes } from './portfolio';
 import { type PostArchive, Posts, postRoutes } from './posts';
@@ -100,6 +100,8 @@ export function tradeedgeStores(
    * `x_posts` dataset, else to D1.
    */
   x: { ai?: AiBinding; archive?: PostArchive } = {},
+  /** Notification email (the suite's Email Service); omitted → no Email row. */
+  mail?: SendNotice,
 ) {
   if (!db) return { vault: undefined };
   const strategies = new Strategies(db);
@@ -121,6 +123,7 @@ export function tradeedgeStores(
     portalReturn: `${tradeOrigin(cfg)}/app/?settings=accounts`,
     market,
     logs,
+    mail,
     alpaca: {
       optionsFeed: cfg.live?.optionsFeed,
       stockFeed: cfg.live?.stockFeed,

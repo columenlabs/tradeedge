@@ -4,6 +4,7 @@
 // SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
 // Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
+  type EmailStatus,
   type IntegrationsStatus,
   type KeyTest,
   type NotifyEventStatus,
@@ -18,8 +19,10 @@ import {
   type XStatus,
   addWebhook,
   connectRobinhood,
+  createEmail,
   createNtfy,
   deleteAlpacaKey,
+  deleteEmail,
   deleteNtfy,
   deletePortfolio,
   deleteRobinhood,
@@ -39,6 +42,7 @@ import {
   snaptradePortal,
   syncSnapTrade,
   testAlpaca,
+  testEmail,
   testNtfy,
   testRobinhood,
   testSnapTrade,
@@ -98,6 +102,7 @@ import {
   ExternalLinkIcon,
   LandmarkIcon,
   LinkIcon,
+  MailIcon,
   PencilIcon,
   PlugIcon,
   PlusIcon,
@@ -1749,6 +1754,66 @@ function Ntfy({ status }: { status: NtfyStatus }) {
   );
 }
 
+// ── Email ──
+
+/** Notifications by email to the person's sign-in address (Bikram, 2026-10-12). */
+function Email({ status }: { status: EmailStatus }) {
+  const qc = useQueryClient();
+  const create = useMutation({
+    mutationFn: createEmail,
+    onSuccess: (data) => qc.setQueryData(integrationsQuery().queryKey, data),
+  });
+  const remove = useMutation({
+    mutationFn: deleteEmail,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  if (!status.connected)
+    return status.available ? (
+      <div className="grid grid-cols-1 gap-3">
+        <p className="text-sm">
+          Get TradeEdge alerts by email at the address you sign in with. Nothing to set up.
+        </p>
+        <ErrorLine error={create.error} />
+        <Button
+          size="sm"
+          className="justify-self-start"
+          disabled={create.isPending}
+          onClick={() => create.mutate()}
+        >
+          {create.isPending ? <RefreshCwIcon className="animate-spin" /> : <MailIcon />}
+          Turn on
+        </Button>
+      </div>
+    ) : (
+      <p className="text-sm">Email is not set up on this server.</p>
+    );
+  return (
+    <div className="grid grid-cols-1 gap-5">
+      <Section title="Sends to">
+        <p className="text-sm">{status.address}, from hello@edgedesk.app</p>
+      </Section>
+      <Section title="Test">
+        <KeyTestLine test={status.last_test} run={testEmail} />
+      </Section>
+      <div className="flex flex-wrap items-center gap-2">
+        <ErrorLine error={remove.error} />
+        <span className="flex-1" />
+        <ConfirmDelete
+          title="Turn off email notifications?"
+          description="TradeEdge stops emailing you. You can turn it on again any time."
+          action="Turn off"
+          onConfirm={() => remove.mutate()}
+        >
+          <Button size="sm" variant="destructive">
+            <Trash2Icon />
+            Turn off
+          </Button>
+        </ConfirmDelete>
+      </div>
+    </div>
+  );
+}
+
 // ── Webhooks ──
 
 function WebhookRow({ hook }: { hook: WebhookTarget }) {
@@ -1889,6 +1954,7 @@ function Events() {
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
   if (q.isError) return <ErrorLine error={q.error} />;
   const targets = [
+    ...(q.data.email.connected ? [{ id: 'email', name: 'Email', icon: MailIcon }] : []),
     ...(q.data.ntfy.connected ? [{ id: 'ntfy', name: 'Phone (ntfy)', icon: BellIcon }] : []),
     ...q.data.webhooks.map((h) => ({ id: h.id, name: h.name, icon: WebhookIcon })),
   ];
@@ -1896,7 +1962,7 @@ function Events() {
     return (
       <div className="grid grid-cols-1 gap-3">
         <p className="text-sm">
-          Nothing to send to yet. Turn on ntfy for phone alerts, or add a webhook, in Integrations.
+          Nothing to send to yet. Turn on email or ntfy, or add a webhook, in Integrations.
         </p>
         <Button
           size="sm"
@@ -2018,6 +2084,21 @@ function Integrations() {
         <XIntegration status={q.data.x} />
       </IntegrationRow>
       <IntegrationRow
+        name="Email"
+        meta="Notifications to your sign-in address"
+        open={open === 'email'}
+        onOpenChange={toggle('email')}
+        badge={
+          q.data.email.connected ? (
+            <TestBadge test={q.data.email.last_test} />
+          ) : (
+            <Badge variant="outline">Off</Badge>
+          )
+        }
+      >
+        <Email status={q.data.email} />
+      </IntegrationRow>
+      <IntegrationRow
         name="ntfy"
         meta="Phone notifications through the ntfy app"
         open={open === 'ntfy'}
@@ -2123,14 +2204,15 @@ export const INTEGRATION_SETTINGS: SettingsSectionDef[] = [
     id: 'integrations',
     title: 'Integrations',
     icon: PlugIcon,
-    description: 'SnapTrade, Alpaca, Robinhood, X, ntfy and webhooks, with your own sign-ins.',
+    description:
+      'SnapTrade, Alpaca, Robinhood, X, email, ntfy and webhooks, with your own sign-ins.',
     content: <Integrations />,
   },
   {
     id: 'events',
     title: 'Events',
     icon: BellRingIcon,
-    description: 'Choose where each event notifies you: your phone (ntfy) or your webhooks.',
+    description: 'Choose where each event notifies you: email, your phone (ntfy) or your webhooks.',
     content: <Events />,
   },
   {

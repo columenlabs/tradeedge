@@ -32,9 +32,8 @@ import {
 
 const MAX_POSITIONS = 500;
 
-/** Margin borrowed in one account, held as a stock position: negative quantity = the loan in USD,
- *  avg_cost 1, always priced at $1 (`/quotes`), so its value is the debt and its P&L is zero. */
-export const MARGIN_CASH = 'MARGIN-CASH';
+/** Accounts stored before cash went signed held margin as this position; read as negative cash. */
+const STORED_MARGIN = 'MARGIN-CASH';
 
 export const portfolioIdSchema = z.string().regex(/^pf_[0-9a-f]{16}$/, 'portfolio id (pf_…)');
 
@@ -82,7 +81,7 @@ export const portfolioWriteShape = {
     .describe(
       'The broker, e.g. SoFi Invest. Needed for a new account; one SnapTrade supports is refused.',
     ),
-  cash: z.number().finite().default(0).describe('Cash in USD.'),
+  cash: z.number().finite().default(0).describe('Cash in USD; negative is margin borrowed.'),
   as_of: z
     .string()
     .datetime({ offset: true })
@@ -386,13 +385,12 @@ const full = (
     rows,
     costs,
     close,
-    skip: MARGIN_CASH,
     splits,
   });
   return {
     ...rest,
     positions: rest.positions.map((p) => {
-      const avg = p.symbol === MARGIN_CASH ? null : lotAverage(p, math.lots);
+      const avg = lotAverage(p, math.lots);
       return avg === null ? p : { ...p, avg_cost: avg, avg_cost_from: 'lots' as const };
     }),
     ...math,
@@ -482,7 +480,14 @@ export class Portfolios {
     const open = await Promise.all(
       results.map(async (r) => {
         const stored = await v.open<StoredPortfolio>(`portfolios:${r.id}`, r.data);
-        return { id: r.id, ...stored, source: stored.source ?? 'manual' };
+        const margin = stored.positions.filter((p) => p.underlying === STORED_MARGIN);
+        return {
+          id: r.id,
+          ...stored,
+          cash: margin.reduce((sum, p) => sum + p.quantity, stored.cash),
+          positions: stored.positions.filter((p) => p.underlying !== STORED_MARGIN),
+          source: stored.source ?? 'manual',
+        };
       }),
     );
     return open.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

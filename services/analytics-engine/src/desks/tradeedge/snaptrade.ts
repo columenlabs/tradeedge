@@ -11,13 +11,7 @@
  * and signs the body with the same consumer key; a holdings or transactions event re-syncs.
  */
 import { z } from 'zod';
-import {
-  type LotInput,
-  MARGIN_CASH,
-  type SyncedAccount,
-  type TaxType,
-  type TransactionInput,
-} from './portfolio';
+import type { LotInput, SyncedAccount, TaxType, TransactionInput } from './portfolio';
 
 const API = 'https://api.snaptrade.com';
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
@@ -426,13 +420,10 @@ const transactionCheck = z
       (t.underlying !== undefined && t.quantity !== undefined && t.price !== undefined),
   );
 
-/** Cash in USD; a negative balance is margin borrowed and goes in as MARGIN-CASH (data rules). */
+/** Cash in USD, signed: negative is margin borrowed (data rules). */
 export function mapCash(balances: StBalance[]) {
   const usd = balances.find((b) => (b.currency?.code ?? 'USD').toUpperCase() === 'USD');
-  const cash = num(usd?.cash) ?? 0;
-  return cash < 0
-    ? { cash: 0, margin: { underlying: MARGIN_CASH, quantity: cash, avg_cost: 1 } }
-    : { cash, margin: null };
+  return num(usd?.cash) ?? 0;
 }
 
 /** Verifies a webhook's `Signature`: HMAC-SHA256 of the body with the consumer key, base64. */

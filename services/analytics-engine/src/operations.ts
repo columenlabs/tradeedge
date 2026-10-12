@@ -417,9 +417,7 @@ export const SERVER_INSTRUCTIONS =
   'X posts: integration_write {provider: "x", api_key, handles} stores your own twitterapi.io key ' +
   '(you pay twitterapi.io) and the X accounts to track; post_list then reads their posts, tagged ' +
   'with symbols, a macro theme and sentiment, e.g. post_list {symbol: "NVDA", hours: 48}. ' +
-  'Track margin cash per account as a position: underlying "MARGIN-CASH", quantity = minus the ' +
-  'margin borrowed in USD, avg_cost 1, e.g. {underlying: "MARGIN-CASH", quantity: -12500, avg_cost: 1}; ' +
-  'it is always priced at $1, so its value is the debt and it never shows a gain or loss. ' +
+  "An account's cash is signed: negative is margin borrowed, e.g. cash: -12500. " +
   'Tag holdings two ways. A sector belongs to a ticker, shared by every account and option on it: ' +
   'sector_write {sectors: {"TQQQ": "Technology"}}. A basket belongs to a holding, e.g. the positions ' +
   'one strategy holds: basket_write {basket: "9-sig", symbols: ["TQQQ", "GLDM"]} (add portfolio_id ' +

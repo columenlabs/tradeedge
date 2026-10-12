@@ -1158,9 +1158,10 @@ function showsLive(config: CustomViewConfig): boolean {
   );
 }
 
+/** The line an account's cash shows as, signed (negative is margin borrowed): Yahoo Finance's cash
+ *  symbol, which no ticker can be (Bikram, 2026-10-12). */
+const CASH = '$$CASH';
 /** The symbol a holding is priced by: the OCC symbol for an option, the ticker for shares. */
-/** The line an account's cash balance shows as; not upper case, so it never meets a ticker. */
-const CASH = 'Cash';
 const priceSymbol = (p: { right?: unknown; symbol: string; underlying: string }) =>
   p.right ? p.symbol : p.underlying;
 
