@@ -227,6 +227,8 @@ export interface TaxLot {
   quantity: number;
   cost: number;
   term: 'short' | 'long';
+  /** `yours` when you set the term by hand. */
+  term_from?: 'yours';
   /** Set when the cost is not the lot's own: yours, a transaction's price, the close that day, or none. */
   cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
   /** Shares held before the history starts (no buy on record): no cost until you set one. */
@@ -251,6 +253,8 @@ export interface ClosedLot {
   /** null when the cost is unknown. */
   gain: number | null;
   term: 'short' | 'long';
+  /** `yours` when you set the term by hand. */
+  term_from?: 'yours';
   /** Shares held before the history starts: `acquired` is the first row's day. */
   before_history?: true;
 }
@@ -559,7 +563,35 @@ export interface IntegrationsStatus {
     | { connected: false }
     | { connected: true; key_id: string; saved_at: string; last_test: KeyTest | null };
   robinhood: RobinhoodStatus;
+  ntfy: NtfyStatus;
+  webhooks: WebhookTarget[];
+  events: NotifyEventStatus[];
 }
+/** A webhook target (Bikram, 2026-10-12); `url` is masked. */
+export interface WebhookTarget {
+  id: string;
+  name: string;
+  url: string;
+  created_at: string;
+  last_test: KeyTest | null;
+}
+/** One event and the targets (`ntfy` or a webhook id) it is turned off for. */
+export interface NotifyEventStatus {
+  key: string;
+  label: string;
+  detail: string;
+  off: string[];
+}
+/** Notifications (Bikram, 2026-10-12): the person's own ntfy.sh topic, which their phone's ntfy app subscribes to. */
+export type NtfyStatus =
+  | { connected: false }
+  | {
+      connected: true;
+      server: string;
+      topic: string;
+      created_at: string;
+      last_test: KeyTest | null;
+    };
 /** A key's last test: one cheap read with it (Bikram, 2026-10-12). */
 export interface KeyTest {
   at: string;
@@ -621,6 +653,18 @@ export const finishRobinhood = (url: string) =>
 export const testRobinhood = () =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/robinhood/test', {});
 export const deleteRobinhood = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/robinhood');
+export const createNtfy = () => send<IntegrationsStatus>('POST', '/api/v1/integrations/ntfy', {});
+export const testNtfy = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/ntfy/test', {});
+export const deleteNtfy = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/ntfy');
+export const addWebhook = (hook: { name: string; url: string }) =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/webhooks', hook);
+export const testWebhook = (id: string) =>
+  send<IntegrationsStatus>('POST', `/api/v1/integrations/webhooks/${enc(id)}/test`, {});
+export const deleteWebhook = (id: string) =>
+  send<{ ok: true }>('DELETE', `/api/v1/integrations/webhooks/${enc(id)}`);
+export const setNotifyEvent = (event: string, target: string, on: boolean) =>
+  send<IntegrationsStatus>('PUT', `/api/v1/integrations/events/${enc(event)}`, { target, on });
 
 // ── Manual accounts (brokers SnapTrade can't reach) ──
 
@@ -652,10 +696,15 @@ export interface LotInput {
   quantity: number;
   cost: number;
 }
-/** Your cost per share for a symbol's lots acquired on one day (null clears it). */
+/** Your cost per share and term for a symbol's lots acquired on one day (null clears; left out keeps). */
 export const writeLotCost = (
   portfolioId: string,
-  cost: { underlying: string; acquired: string; cost: number | null },
+  cost: {
+    underlying: string;
+    acquired: string;
+    cost?: number | null;
+    term?: 'short' | 'long' | null;
+  },
 ) => send<Portfolio>('PUT', `/api/v1/portfolios/${enc(portfolioId)}/lot-costs`, cost);
 export const writeLots = (portfolioId: string, lots: LotInput[]) =>
   send<Portfolio>('PUT', `/api/v1/portfolios/${enc(portfolioId)}/lots`, { lots });

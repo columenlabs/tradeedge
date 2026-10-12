@@ -13,6 +13,9 @@ export interface DrawerSectionProps {
   hint?: string | null;
   /** Sections start collapsed unless set open (Bikram, 2026-10-12). */
   defaultOpen?: boolean;
+  /** Controlled open state, when the caller opens a section itself. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   children: ReactNode;
 }
 
@@ -27,10 +30,17 @@ export function DrawerSection({
   count,
   hint,
   defaultOpen = false,
+  open,
+  onOpenChange,
   children,
 }: DrawerSectionProps) {
   return (
-    <Collapsible defaultOpen={defaultOpen} className="group/section border-t py-1 first:border-t-0">
+    <Collapsible
+      defaultOpen={defaultOpen}
+      open={open}
+      onOpenChange={onOpenChange}
+      className="group/section border-t py-1 first:border-t-0"
+    >
       <CollapsibleTrigger asChild>
         <Button
           variant="ghost"

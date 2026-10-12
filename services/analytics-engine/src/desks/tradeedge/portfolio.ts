@@ -308,7 +308,15 @@ export const lotCostWriteShape = {
     .finite()
     .nonnegative()
     .nullable()
-    .describe('Per share, in USD; null clears your cost.'),
+    .optional()
+    .describe('Per share, in USD; null clears your cost; leave out to keep it.'),
+  term: z
+    .enum(['short', 'long'])
+    .nullable()
+    .optional()
+    .describe(
+      'Short or long term by hand, outranking the holding period; null clears yours; leave out to keep it.',
+    ),
 };
 export type LotCostWrite = z.infer<z.ZodObject<typeof lotCostWriteShape>>;
 /** `portfolio_lot_write` input (MCP) and the PUT body (REST): every open lot of a manual account. */
@@ -756,9 +764,9 @@ export class Portfolios {
   }
 
   /**
-   * Sets (or, with cost null, clears) your cost for one symbol's lots acquired on one day, on any
-   * account, SnapTrade's too: a broker often has no cost for RSU or transferred-in shares. It
-   * outranks the broker's cost and the estimate, and survives syncs.
+   * Sets (or, with null, clears) your cost and term for one symbol's lots acquired on one day, on
+   * any account, SnapTrade's too: a broker often has no cost for RSU or transferred-in shares, and a
+   * derived lot's date can miss the real holding period. Both outrank the lot's own and survive syncs.
    */
   async writeLotCost(owner: string, input: LotCostWrite): Promise<Portfolio> {
     const v = await this.vault.for(owner);
@@ -766,9 +774,18 @@ export class Portfolios {
     const symbol = input.underlying;
     const same = (o: LotCost) =>
       o.symbol === symbol && o.acquired === input.acquired && o.quantity === input.quantity;
+    const prev = (stored.lot_costs ?? []).find(same);
     const rest = (stored.lot_costs ?? []).filter((o) => !same(o));
+    // Each field: a value sets it, null clears it, left out keeps what was set.
+    const cost =
+      input.cost === undefined
+        ? prev?.cost
+        : input.cost === null
+          ? undefined
+          : Math.round(input.cost * 1e4) / 1e4;
+    const term = input.term === undefined ? prev?.term : (input.term ?? undefined);
     const lot_costs =
-      input.cost === null
+      cost === undefined && term === undefined
         ? rest
         : [
             ...rest,
@@ -776,7 +793,8 @@ export class Portfolios {
               symbol,
               acquired: input.acquired,
               ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
-              cost: Math.round(input.cost * 1e4) / 1e4,
+              ...(cost !== undefined ? { cost } : {}),
+              ...(term ? { term } : {}),
             },
           ];
     await this.store(v, id, await v.index(`portfolio:${stored.name}`), { ...stored, lot_costs });

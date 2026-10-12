@@ -40,8 +40,9 @@ export interface TaxLot {
   quantity: number;
   /** Per share, in USD, fees included. */
   cost: number;
-  /** long once held more than a year. */
+  /** long once held more than a year, unless you set it (`term_from: 'yours'`). */
   term: 'short' | 'long';
+  term_from?: 'yours';
   /** Shares held before the history starts (no buy on record): no cost until you set one. */
   before_history?: true;
   /**
@@ -56,12 +57,36 @@ export interface TaxLot {
 /** A lot as stored (broker or manual): the term and source are worked out on read. */
 export type StoredLot = Omit<TaxLot, 'term' | 'source' | 'cost_from'>;
 
-/** A cost you set for the lots of one symbol acquired on one day (all of them, or the one of `quantity`). */
+/**
+ * What you set for the lots of one symbol acquired on one day (all of them, or the one of
+ * `quantity`): a cost per share, a term, or both. Kept through syncs.
+ */
 export interface LotCost {
   symbol: string;
   acquired: string;
   quantity?: number;
-  cost: number;
+  cost?: number;
+  /** Long or short term by hand (Bikram, 2026-10-12): it outranks the holding period. */
+  term?: 'short' | 'long';
+}
+
+/** Your setting of `field` for a lot: the one for its exact size first, then the one for its day. */
+function yoursFor<K extends 'cost' | 'term'>(
+  costs: LotCost[],
+  field: K,
+  symbol: string,
+  acquired: string,
+  quantity?: number,
+): LotCost[K] | undefined {
+  const set = costs.filter(
+    (o) => o.symbol === symbol && o.acquired === acquired && o[field] !== undefined,
+  );
+  return (set.find(
+    (o) =>
+      quantity !== undefined &&
+      o.quantity !== undefined &&
+      Math.abs(o.quantity) === Math.abs(quantity),
+  ) ?? set.find((o) => o.quantity === undefined))?.[field];
 }
 
 /** A lot, or the part of one, that a later trade closed. */
@@ -81,8 +106,9 @@ export interface ClosedLot {
   proceeds: number;
   /** null when the cost is unknown (shares transferred in). */
   gain: number | null;
-  /** long when held more than a year. */
+  /** long when held more than a year, unless you set it (`term_from: 'yours'`). */
   term: 'short' | 'long';
+  term_from?: 'yours';
   /** Shares held before the history starts (no buy on record): `acquired` is the first row's date. */
   before_history?: true;
 }
@@ -148,6 +174,29 @@ const CASH_FUND = /^[A-Z]{3}XX$/;
 export const MOVES = new Set(['buy', 'sell', 'transfer_in', 'transfer_out']);
 /** A row that adds shares (or covers a short). */
 const adds = (t: Transaction) => t.kind === 'buy' || t.kind === 'transfer_in';
+/**
+ * Drops each move in that a move out of the same symbol and size on the same day undoes (a broker's
+ * journal between margin and cash): the pair moves nothing, so it never trades one lot for another.
+ */
+function journals(rows: Transaction[]) {
+  const ins = rows.filter((t) => t.kind === 'transfer_in');
+  const dropped = new Set<Transaction>();
+  for (const out of rows)
+    if (out.kind === 'transfer_out') {
+      const pair = ins.find(
+        (t) =>
+          !dropped.has(t) &&
+          t.date === out.date &&
+          t.symbol === out.symbol &&
+          t.expiration === out.expiration &&
+          t.strike === out.strike &&
+          t.right === out.right &&
+          t.quantity === out.quantity,
+      );
+      if (pair) dropped.add(pair).add(out);
+    }
+  return rows.filter((t) => !dropped.has(t));
+}
 /** 1 for a row that should run after a day's share buys and moves in. */
 const later = (t: Transaction) => (adds(t) && isShare(t.symbol as string) ? 0 : 1);
 /**
@@ -186,8 +235,9 @@ export function accountLots(a: {
   today?: Date;
 }): AccountLots {
   const today = (a.today ?? new Date()).toISOString().slice(0, 10);
-  const trades = a.rows
-    .filter((t) => MOVES.has(t.kind) && t.symbol && t.quantity && !CASH_FUND.test(t.symbol))
+  const trades = journals(
+    a.rows.filter((t) => MOVES.has(t.kind) && t.symbol && t.quantity && !CASH_FUND.test(t.symbol)),
+  )
     .map(contractOf)
     // Shares that come in on a day go before those that leave it: an RSU vest's sell-to-cover
     // closes the vest's own lot, never a short one the vest then covers.
@@ -223,7 +273,20 @@ export function accountLots(a: {
     const mine = own
       ? own.map((l) => ({ ...l, quantity: sideOf(h, l.quantity) }))
       : (derived.get(symbol) ?? []);
-    for (const l of mine) lots.push(costed({ ...l, term: termOn(l.acquired, today), source }, a));
+    for (const l of mine) {
+      const term = yoursFor(a.costs, 'term', symbol, l.acquired, l.quantity);
+      lots.push(
+        costed(
+          {
+            ...l,
+            term: term ?? termOn(l.acquired, today),
+            ...(term ? { term_from: 'yours' as const } : {}),
+            source,
+          },
+          a,
+        ),
+      );
+    }
     const inLots = shares(mine.reduce((s, l) => s + l.quantity, 0));
     if (checked && Math.abs(h - inLots) >= CHECK_STEP)
       checks.push({ symbol, kind: 'quantity', held: h, in_lots: inLots, no_cost: 0, source });
@@ -297,14 +360,8 @@ function group<T extends { symbol: string }>(rows: T[]) {
  * keep their own cost.
  */
 function costed(l: TaxLot, a: { costs: LotCost[]; rows: Transaction[]; close: CloseOn }): TaxLot {
-  const mine =
-    a.costs.find(
-      (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === l.quantity,
-    ) ??
-    a.costs.find(
-      (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === undefined,
-    );
-  if (mine) return { ...l, cost: mine.cost, cost_from: 'yours' };
+  const mine = yoursFor(a.costs, 'cost', l.symbol, l.acquired, l.quantity);
+  if (mine !== undefined) return { ...l, cost: mine, cost_from: 'yours' };
   if (l.before_history) return { ...l, cost: 0, cost_from: 'missing' };
   if (l.cost > 0 || OCC.test(l.symbol)) return l;
   const same = a.rows.filter(
@@ -337,7 +394,13 @@ function firstInFirstOut(
   );
   // Your cost for an unknown lot (every lot that day of that symbol), else it stays unknown.
   const yours = (symbol: string, acquired: string) =>
-    costs.find((o) => o.symbol === symbol && o.acquired === acquired && o.quantity === undefined);
+    costs.find(
+      (o) =>
+        o.symbol === symbol &&
+        o.acquired === acquired &&
+        o.quantity === undefined &&
+        o.cost !== undefined,
+    );
   // Rule 3: each share symbol starts from the shares its rows cannot explain against what is held
   // now, as one lot before the history, in the units of the first row's day.
   const gone = new Map<string, number>();
@@ -407,7 +470,8 @@ function firstInFirstOut(
         const gain = lot.unknown
           ? null
           : Math.sign(lot.quantity) * (perShare - lot.cost) * take * mult;
-        const term = termOn(lot.acquired, t.date);
+        const mine = yoursFor(costs, 'term', symbol, lot.acquired, take);
+        const term = mine ?? termOn(lot.acquired, t.date);
         if (gain !== null && t.date.startsWith(year)) {
           realized.total += gain;
           if (term === 'short') realized.short_term += gain;
@@ -426,6 +490,7 @@ function firstInFirstOut(
           proceeds: cents(got * take * mult),
           gain: gain === null ? null : cents(gain),
           term,
+          ...(mine ? { term_from: 'yours' as const } : {}),
           ...(lot.before_history ? { before_history: true as const } : {}),
         });
         if (t.date.startsWith(year)) {

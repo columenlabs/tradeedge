@@ -200,7 +200,7 @@ export function rawClosesQuery(
 /**
  * Symbol fields from DataEdge (Bikram, 2026-10-12): each symbol's latest value of each indicator
  * output in `indicators` (`indicators_1d`, last close) and its latest trailing P/E (`series_1d`
- * `pe:<SYMBOL>`, field `trailing`), with the day each is from.
+ * `pe:<SYMBOL>.trailing`, field `value`), with the day each is from.
  */
 export function symbolFactsQuery(
   symbols: string[],
@@ -218,13 +218,14 @@ export function symbolFactsQuery(
       'AND trading_date >= today() - 14',
       'GROUP BY symbol, indicator',
       'UNION ALL',
-      "SELECT replaceOne(series_id, 'pe:', '') AS symbol, 'pe_ttm_daily' AS field,",
-      'argMax(value, obs_date) AS value, toString(max(obs_date)) AS date',
-      `FROM ${database}.series_1d FINAL`,
-      "WHERE field = 'trailing' AND series_id IN",
-      "(SELECT arrayJoin(arrayMap(s -> concat('pe:', s), splitByChar(',', {symbols:String}))))",
-      'AND obs_date >= today() - 14',
-      'GROUP BY series_id',
+      // `s.` keeps the column apart from the `field` alias, which ClickHouse would read first.
+      "SELECT replaceOne(replaceOne(s.series_id, 'pe:', ''), '.trailing', '') AS symbol,",
+      "'pe_ttm_daily' AS field, argMax(s.value, s.obs_date) AS value, toString(max(s.obs_date)) AS date",
+      `FROM ${database}.series_1d AS s FINAL`,
+      "WHERE s.field = 'value' AND s.series_id IN",
+      "(SELECT arrayJoin(arrayMap(x -> concat('pe:', x, '.trailing'), splitByChar(',', {symbols:String}))))",
+      'AND s.obs_date >= today() - 14',
+      'GROUP BY s.series_id',
     ].join(' '),
     params: { symbols: symbols.join(','), indicators: indicators.join(',') },
   };

@@ -9,6 +9,11 @@
  *   alpaca     the person's market-data key; live quotes and chains use it instead of EdgeDesk's.
  *   robinhood  OAuth tokens for Robinhood's agentic-trading MCP (Bikram, 2026-10-12), signed in from the
  *              app only, plus the Agentic account and its trade-approval setting from the last test.
+ *   ntfy       Notifications (Bikram, 2026-10-12): the person's own unguessable ntfy.sh topic, which their
+ *              phone's ntfy app subscribes to.
+ *   webhooks   the person's own URLs that get each event as JSON (Bikram, 2026-10-12), any number.
+ *   events     which targets (ntfy, each webhook) each event goes to (Settings ▸ Events): every target
+ *              gets every event unless the person turns it off. Messages name no account, holding or amount.
  */
 import { AlpacaClient, type AlpacaConfig } from '@edgedesk/providers';
 import { type Context, Hono } from 'hono';
@@ -43,7 +48,7 @@ import {
 } from './snaptrade';
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
-export type Provider = 'snaptrade' | 'alpaca' | 'robinhood';
+export type Provider = 'snaptrade' | 'alpaca' | 'robinhood' | 'ntfy' | 'webhooks' | 'events';
 
 export interface SyncReport {
   at: string;
@@ -103,10 +108,72 @@ interface RobinhoodDoc {
     error: string | null;
   } | null;
 }
+interface NtfyDoc {
+  /** The topic's name on ntfy.sh: whoever knows it can read it, so it is random and sealed. */
+  topic: string;
+  created_at: string;
+  last_test: KeyTest | null;
+}
+interface Webhook {
+  id: string;
+  name: string;
+  url: string;
+  created_at: string;
+  last_test: KeyTest | null;
+}
+interface WebhooksDoc {
+  hooks: Webhook[];
+}
+interface EventsDoc {
+  /** Targets (`ntfy` or a webhook id) each event is turned off for; anything not listed is on. */
+  off: Partial<Record<NotifyEvent, string[]>>;
+}
 interface Docs {
   snaptrade: SnapTradeDoc;
   alpaca: AlpacaDoc;
   robinhood: RobinhoodDoc;
+  ntfy: NtfyDoc;
+  webhooks: WebhooksDoc;
+  events: EventsDoc;
+}
+
+/** What notifies: only events that exist (Bikram picks any new one). */
+export const NOTIFY_EVENTS = {
+  broker_signin: {
+    label: 'Broker needs signing in again',
+    detail: 'SnapTrade lost its connection to a broker, so Holdings stop updating.',
+  },
+  sync_failed: {
+    label: 'SnapTrade sync failed',
+    detail: 'A sync of your accounts ended with errors; Logs has the reason.',
+  },
+} as const;
+export type NotifyEvent = keyof typeof NOTIFY_EVENTS;
+const MAX_WEBHOOKS = 10;
+export const webhookShape = {
+  name: z.string().trim().min(1).max(60).describe('Your name for this webhook.'),
+  url: z
+    .string()
+    .trim()
+    .url()
+    .max(2000)
+    .refine((u) => u.startsWith('https://'), 'The address must start with https://')
+    .describe('The https address that gets each event as JSON.'),
+};
+/** A webhook address without its path and query, which often hold a secret. */
+const maskUrl = (u: string) => {
+  const url = new URL(u);
+  const rest = `${url.pathname}${url.search}`;
+  return `${url.origin}${rest.length > 1 ? `/…${rest.slice(-4)}` : ''}`;
+};
+
+/** The public ntfy server; the phone app subscribes to it by default. */
+export const NTFY_SERVER = 'https://ntfy.sh';
+/** One notification: a title, one line, and the page a tap opens. */
+export interface Notice {
+  title: string;
+  message: string;
+  click?: string;
 }
 
 const passed = (detail: string): KeyTest => ({
@@ -307,12 +374,36 @@ export class Integrations {
    * false skips SnapTrade (the header's sync status reads only what is stored).
    */
   async status(owner: string, live = true) {
-    const [st, alp, rh] = await Promise.all([
+    const [st, alp, rh, nt, wh, ev] = await Promise.all([
       this.get(owner, 'snaptrade'),
       this.get(owner, 'alpaca'),
       this.get(owner, 'robinhood'),
+      this.get(owner, 'ntfy'),
+      this.get(owner, 'webhooks'),
+      this.get(owner, 'events'),
     ]);
     return {
+      webhooks: (wh?.hooks ?? []).map((h) => ({
+        id: h.id,
+        name: h.name,
+        url: maskUrl(h.url),
+        created_at: h.created_at,
+        last_test: h.last_test,
+      })),
+      events: (Object.keys(NOTIFY_EVENTS) as NotifyEvent[]).map((key) => ({
+        key,
+        ...NOTIFY_EVENTS[key],
+        off: ev?.off[key] ?? [],
+      })),
+      ntfy: nt
+        ? {
+            connected: true as const,
+            server: NTFY_SERVER,
+            topic: nt.topic,
+            created_at: nt.created_at,
+            last_test: nt.last_test,
+          }
+        : { connected: false as const },
       robinhood: rh?.tokens
         ? {
             connected: true as const,
@@ -612,6 +703,12 @@ export class Integrations {
       ms: performance.now() - t0,
       detail: report.errors.length ? report.errors.join('; ') : undefined,
     });
+    if (!report.ok)
+      await this.notify(owner, 'sync_failed', {
+        title: 'SnapTrade sync failed',
+        message: 'Holdings may be out of date. Logs has the reason.',
+        click: this.opts.portalReturn,
+      });
     return report;
   }
 
@@ -676,6 +773,12 @@ export class Integrations {
       ok: true,
       detail: SYNC_EVENTS.has(type) ? 'Re-sync started' : undefined,
     });
+    if (type === 'CONNECTION_BROKEN')
+      await this.notify(row.owner, 'broker_signin', {
+        title: 'A broker needs signing in again',
+        message: 'SnapTrade lost its connection. Reconnect it in Brokers and accounts.',
+        click: this.opts.portalReturn,
+      });
     return {
       status: 200,
       work: SYNC_EVENTS.has(type) ? this.sync(row.owner, event.accountId || undefined) : undefined,
@@ -925,6 +1028,180 @@ export class Integrations {
   async deleteRobinhood(owner: string) {
     await this.update(owner, 'robinhood', () => null);
   }
+
+  // ── Notifications (ntfy) ──
+
+  /** Gives the person a new random topic (replacing any old one). */
+  async ntfyCreate(owner: string) {
+    await this.update(owner, 'ntfy', () => ({
+      topic: `edgedesk-${randomId()}`,
+      created_at: new Date().toISOString(),
+      last_test: null,
+    }));
+    await this.opts.logs?.note(owner, { category: 'user', what: 'Notifications on', ok: true });
+    return this.status(owner, false);
+  }
+
+  private async publish(topic: string, n: Notice) {
+    const res = await (this.opts.fetch ?? fetch)(`${NTFY_SERVER}/${topic}`, {
+      method: 'POST',
+      headers: {
+        Title: n.title,
+        Tags: 'chart_with_upwards_trend',
+        ...(n.click ? { Click: n.click } : {}),
+      },
+      body: n.message,
+    });
+    if (!res.ok) throw new Error(`ntfy ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+
+  private async post(hook: Webhook, event: NotifyEvent | 'test', n: Notice) {
+    const res = await (this.opts.fetch ?? fetch)(hook.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'TradeEdge' },
+      body: JSON.stringify({ event, ...n, at: new Date().toISOString() }),
+    });
+    if (!res.ok) throw new Error(`webhook ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+
+  /** Sends one event to every target it is on for; a failure is logged, never thrown. */
+  async notify(owner: string, event: NotifyEvent, n: Notice) {
+    const [nt, wh, ev] = await Promise.all([
+      this.get(owner, 'ntfy'),
+      this.get(owner, 'webhooks'),
+      this.get(owner, 'events'),
+    ]);
+    const off = new Set(ev?.off[event] ?? []);
+    const sends: { target: string; send: () => Promise<void> }[] = [];
+    if (nt && !off.has('ntfy'))
+      sends.push({ target: 'ntfy', send: () => this.publish(nt.topic, n) });
+    for (const h of wh?.hooks ?? [])
+      if (!off.has(h.id)) sends.push({ target: h.name, send: () => this.post(h, event, n) });
+    await Promise.all(
+      sends.map(async ({ target, send }) => {
+        try {
+          await send();
+        } catch (err) {
+          await this.opts.logs?.note(owner, {
+            category: 'backend',
+            what: `Notification not sent to ${target}: ${n.title}`,
+            ok: false,
+            detail: (err as Error).message,
+          });
+        }
+      }),
+    );
+  }
+
+  /** Sends a test notification and keeps the result. */
+  async ntfyTest(owner: string) {
+    const doc = await this.get(owner, 'ntfy');
+    if (!doc) throw new IntegrationNotConnected('Notifications are off: turn them on first.');
+    const t0 = performance.now();
+    let result: KeyTest;
+    try {
+      await this.publish(doc.topic, {
+        title: 'TradeEdge test',
+        message: 'Notifications work. You will hear from TradeEdge here.',
+      });
+      result = passed('notification sent');
+    } catch (err) {
+      result = failed(err);
+    }
+    await this.update(owner, 'ntfy', (p) => (p ? { ...p, last_test: result } : p));
+    await this.noteTest(owner, 'user', 'Notifications test', result, t0);
+    return this.status(owner, false);
+  }
+
+  async deleteNtfy(owner: string) {
+    await this.update(owner, 'ntfy', () => null);
+    await this.dropTarget(owner, 'ntfy');
+  }
+
+  // ── Webhooks ──
+
+  async addWebhook(owner: string, hook: { name: string; url: string }) {
+    await this.update(owner, 'webhooks', (prev) => {
+      const hooks = prev?.hooks ?? [];
+      if (hooks.length >= MAX_WEBHOOKS)
+        throw new IntegrationInvalid(`Up to ${MAX_WEBHOOKS} webhooks.`);
+      return {
+        hooks: [
+          ...hooks,
+          {
+            id: `wh_${randomId().slice(0, 12)}`,
+            ...hook,
+            created_at: new Date().toISOString(),
+            last_test: null,
+          },
+        ],
+      };
+    });
+    await this.opts.logs?.note(owner, {
+      category: 'user',
+      what: `Webhook added: ${hook.name}`,
+      ok: true,
+    });
+    return this.status(owner, false);
+  }
+
+  /** Sends a test event to one webhook and keeps the result. */
+  async webhookTest(owner: string, id: string) {
+    const hook = (await this.get(owner, 'webhooks'))?.hooks.find((h) => h.id === id);
+    if (!hook) throw new IntegrationInvalid('No such webhook.');
+    const t0 = performance.now();
+    let result: KeyTest;
+    try {
+      await this.post(hook, 'test', {
+        title: 'TradeEdge test',
+        message: 'This webhook works. You will get TradeEdge events here.',
+      });
+      result = passed('test event sent');
+    } catch (err) {
+      result = failed(err);
+    }
+    await this.update(owner, 'webhooks', (p) =>
+      p ? { hooks: p.hooks.map((h) => (h.id === id ? { ...h, last_test: result } : h)) } : p,
+    );
+    await this.noteTest(owner, 'user', `Webhook test: ${hook.name}`, result, t0);
+    return this.status(owner, false);
+  }
+
+  async deleteWebhook(owner: string, id: string) {
+    await this.update(owner, 'webhooks', (p) => {
+      const hooks = (p?.hooks ?? []).filter((h) => h.id !== id);
+      return hooks.length ? { hooks } : null;
+    });
+    await this.dropTarget(owner, id);
+  }
+
+  // ── Events ──
+
+  /** Turns one event on or off for one target (`ntfy` or a webhook id). */
+  async setEvent(owner: string, event: NotifyEvent, target: string, on: boolean) {
+    await this.update(owner, 'events', (prev) => {
+      const off = { ...(prev?.off ?? {}) };
+      const now = new Set(off[event] ?? []);
+      if (on) now.delete(target);
+      else now.add(target);
+      off[event] = [...now];
+      return { off };
+    });
+    return this.status(owner, false);
+  }
+
+  /** Forgets a removed target in every event. */
+  private async dropTarget(owner: string, target: string) {
+    await this.update(owner, 'events', (prev) =>
+      prev
+        ? {
+            off: Object.fromEntries(
+              Object.entries(prev.off).map(([k, v]) => [k, (v ?? []).filter((t) => t !== target)]),
+            ),
+          }
+        : prev,
+    );
+  }
 }
 
 // Robinhood documents its tools' inputs, not their outputs, so results are read by key wherever they sit:
@@ -1102,6 +1379,31 @@ export function integrationRoutes(svc: Integrations) {
     );
   });
   r.post('/robinhood/test', async (c) => c.json(await svc.robinhoodTest(owner(c))));
+  r.post('/ntfy', async (c) => c.json(await svc.ntfyCreate(owner(c))));
+  r.post('/ntfy/test', async (c) => c.json(await svc.ntfyTest(owner(c))));
+  r.delete('/ntfy', async (c) => {
+    await svc.deleteNtfy(owner(c));
+    return c.json({ ok: true });
+  });
+  r.post('/webhooks', async (c) => {
+    const p = await parse(c, webhookShape);
+    if (!p.success) return c.json(invalid(p.error.issues), 400);
+    return c.json(await svc.addWebhook(owner(c), p.data));
+  });
+  r.post('/webhooks/:id/test', async (c) =>
+    c.json(await svc.webhookTest(owner(c), c.req.param('id'))),
+  );
+  r.delete('/webhooks/:id', async (c) => {
+    await svc.deleteWebhook(owner(c), c.req.param('id'));
+    return c.json({ ok: true });
+  });
+  r.put('/events/:event', async (c) => {
+    const event = c.req.param('event');
+    if (!(event in NOTIFY_EVENTS)) return c.json({ error: 'no such event' }, 404);
+    const p = await parse(c, { target: z.string().trim().min(1).max(40), on: z.boolean() });
+    if (!p.success) return c.json(invalid(p.error.issues), 400);
+    return c.json(await svc.setEvent(owner(c), event as NotifyEvent, p.data.target, p.data.on));
+  });
   r.delete('/robinhood', async (c) => {
     await svc.deleteRobinhood(owner(c));
     return c.json({ ok: true });

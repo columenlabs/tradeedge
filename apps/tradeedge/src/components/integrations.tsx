@@ -1,34 +1,44 @@
 // Settings ▸ Integrations (Bikram, 2026-10-10): the services TradeEdge connects to with the person's
 // own keys, one list, each row expanding in place (all collapsed at first; Bikram, 2026-10-12): SnapTrade (key, sync, webhook) and Alpaca (live
-// data key), plus Robinhood (Bikram, 2026-10-12: OAuth sign-in to its agentic-trading MCP). Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
+// data key), plus Robinhood (Bikram, 2026-10-12: OAuth sign-in to its agentic-trading MCP) ntfy (an ntfy.sh topic per person) and webhooks; Settings ▸ Events picks which targets each event goes to. Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
 // SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
 // Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
   type IntegrationsStatus,
   type KeyTest,
+  type NotifyEventStatus,
+  type NtfyStatus,
   type Portfolio,
   type RobinhoodStatus,
   type SnapTradeAccount,
   type SnapTradeBroker,
   type SyncReport,
   type TaxType,
+  type WebhookTarget,
+  addWebhook,
   connectRobinhood,
+  createNtfy,
   deleteAlpacaKey,
+  deleteNtfy,
   deletePortfolio,
   deleteRobinhood,
   deleteSnapTradeKey,
+  deleteWebhook,
   finishRobinhood,
   holdingsAccountsQuery,
   integrationsQuery,
   saveAlpacaKey,
   saveSnapTradeKey,
   setAccountTrade,
+  setNotifyEvent,
   setSnapTradeAccount,
   snaptradePortal,
   syncSnapTrade,
   testAlpaca,
+  testNtfy,
   testRobinhood,
   testSnapTrade,
+  testWebhook,
   writeLots,
   writeManualAccount,
   writeTransactions,
@@ -75,6 +85,8 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangleIcon,
+  BellIcon,
+  BellRingIcon,
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -88,6 +100,7 @@ import {
   RotateCcwIcon,
   Trash2Icon,
   UploadIcon,
+  WebhookIcon,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
@@ -1346,6 +1359,306 @@ function Robinhood({ status }: { status: RobinhoodStatus }) {
   );
 }
 
+// ── Notifications (ntfy) ──
+
+const NTFY_IOS = 'https://apps.apple.com/us/app/ntfy/id1625396347';
+const NTFY_ANDROID = 'https://play.google.com/store/apps/details?id=io.heckel.ntfy';
+
+function CopyField({ id, value }: { id: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <InputGroup>
+      <InputGroupInput
+        id={id}
+        readOnly
+        className="num"
+        value={value}
+        onFocus={(e) => e.currentTarget.select()}
+      />
+      <InputGroupAddon align="inline-end">
+        <InputGroupButton
+          size="xs"
+          aria-label="Copy topic"
+          onClick={() => {
+            void navigator.clipboard.writeText(value);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+        >
+          {copied ? <CheckIcon /> : <CopyIcon />}
+          {copied ? 'Copied' : 'Copy'}
+        </InputGroupButton>
+      </InputGroupAddon>
+    </InputGroup>
+  );
+}
+
+function Ntfy({ status }: { status: NtfyStatus }) {
+  const qc = useQueryClient();
+  const create = useMutation({
+    mutationFn: createNtfy,
+    onSuccess: (data) => qc.setQueryData(integrationsQuery().queryKey, data),
+  });
+  const remove = useMutation({
+    mutationFn: deleteNtfy,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  if (!status.connected)
+    return (
+      <div className="grid grid-cols-1 gap-3">
+        <p className="text-sm">
+          Get TradeEdge alerts on your phone through the free ntfy app. TradeEdge makes you a
+          private topic (a random name only you know) and sends to it. No account or sign-up.
+        </p>
+        <ErrorLine error={create.error} />
+        <Button
+          size="sm"
+          className="justify-self-start"
+          disabled={create.isPending}
+          onClick={() => create.mutate()}
+        >
+          {create.isPending ? <RefreshCwIcon className="animate-spin" /> : <BellIcon />}
+          Turn on
+        </Button>
+      </div>
+    );
+  return (
+    <div className="grid grid-cols-1 gap-5">
+      <Section title="Set up your phone">
+        <ol className="grid list-decimal grid-cols-1 gap-2 pl-5 text-sm">
+          <li>
+            Install ntfy:{' '}
+            <a className="underline" href={NTFY_IOS} target="_blank" rel="noreferrer">
+              iPhone
+            </a>{' '}
+            or{' '}
+            <a className="underline" href={NTFY_ANDROID} target="_blank" rel="noreferrer">
+              Android
+            </a>
+            .
+          </li>
+          <li>
+            Open it, tap + (Subscribe to topic) and paste your topic. Keep the server as ntfy.sh.
+          </li>
+          <li>Allow notifications when your phone asks, then tap Test below.</li>
+        </ol>
+        <Field id="ntfy-topic" label="Your topic (keep it private: anyone with it can read it)">
+          <CopyField id="ntfy-topic" value={status.topic} />
+        </Field>
+      </Section>
+      <Section title="Test">
+        <KeyTestLine test={status.last_test} run={testNtfy} />
+      </Section>
+      <div className="flex flex-wrap items-center gap-2">
+        <EventsLink />
+        <ErrorLine error={remove.error} />
+        <span className="flex-1" />
+        <ConfirmDelete
+          title="Turn off notifications?"
+          description="TradeEdge stops sending and forgets your topic. Turning on again makes a new topic, which your phone must subscribe to again."
+          action="Turn off"
+          onConfirm={() => remove.mutate()}
+        >
+          <Button size="sm" variant="destructive">
+            <Trash2Icon />
+            Turn off
+          </Button>
+        </ConfirmDelete>
+      </div>
+    </div>
+  );
+}
+
+/** Settings ▸ Events, where each event's targets are chosen. */
+function EventsLink() {
+  const { openSettings } = useShell();
+  return (
+    <Button size="sm" variant="outline" onClick={() => openSettings('events')}>
+      <BellRingIcon />
+      Choose events
+    </Button>
+  );
+}
+
+// ── Webhooks ──
+
+function WebhookRow({ hook }: { hook: WebhookTarget }) {
+  const qc = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => deleteWebhook(hook.id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  return (
+    <div className="grid grid-cols-1 gap-2 border-b pb-3 last:border-b-0">
+      <div className="flex min-w-0 items-center gap-2">
+        <WebhookIcon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="font-medium">{hook.name}</span>
+        <span className="num min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          {hook.url}
+        </span>
+        <ConfirmDelete
+          title={`Remove ${hook.name}?`}
+          description="TradeEdge stops sending events to this address."
+          action="Remove"
+          onConfirm={() => remove.mutate()}
+        >
+          <Button size="icon-sm" variant="destructive" aria-label={`Remove ${hook.name}`}>
+            <Trash2Icon />
+          </Button>
+        </ConfirmDelete>
+      </div>
+      <KeyTestLine test={hook.last_test} run={() => testWebhook(hook.id)} />
+      <ErrorLine error={remove.error} />
+    </div>
+  );
+}
+
+function Webhooks({ hooks }: { hooks: WebhookTarget[] }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const add = useMutation({
+    mutationFn: () => addWebhook({ name: name.trim(), url: url.trim() }),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      setName('');
+      setUrl('');
+    },
+  });
+  return (
+    <div className="grid grid-cols-1 gap-5">
+      <p className="text-sm">
+        TradeEdge posts each event as JSON to your own addresses: Slack, Discord, Home Assistant,
+        n8n or anything that takes a webhook.
+      </p>
+      {hooks.length ? (
+        <Section title="Your webhooks">
+          {hooks.map((h) => (
+            <WebhookRow key={h.id} hook={h} />
+          ))}
+        </Section>
+      ) : null}
+      <Section title="Add a webhook">
+        <form
+          className="grid grid-cols-1 gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (name.trim() && url.trim()) add.mutate();
+          }}
+        >
+          <Field id="wh-name" label="Name">
+            <Input
+              id="wh-name"
+              placeholder="Discord"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </Field>
+          <Field id="wh-url" label="Address (https)">
+            <Input
+              id="wh-url"
+              className="num"
+              autoComplete="off"
+              placeholder="https://"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+          </Field>
+          <ErrorLine error={add.error} />
+          <div className="flex flex-wrap items-center gap-2">
+            {hooks.length ? <EventsLink /> : null}
+            <span className="flex-1" />
+            <Button type="submit" size="sm" disabled={!name.trim() || !url.trim() || add.isPending}>
+              {add.isPending ? <RefreshCwIcon className="animate-spin" /> : <PlusIcon />}
+              Add
+            </Button>
+          </div>
+        </form>
+      </Section>
+      <p className="text-xs text-muted-foreground">
+        Each post is <span className="num">{'{ event, title, message, click, at }'}</span>. Messages
+        name no account, holding or amount.
+      </p>
+    </div>
+  );
+}
+
+// ── Events ──
+
+function EventTarget({
+  event,
+  target,
+  name,
+  icon: Icon,
+}: {
+  event: NotifyEventStatus;
+  target: string;
+  name: string;
+  icon: typeof BellIcon;
+}) {
+  const qc = useQueryClient();
+  const set = useMutation({
+    mutationFn: (on: boolean) => setNotifyEvent(event.key, target, on),
+    onSuccess: (data) => qc.setQueryData(integrationsQuery().queryKey, data),
+  });
+  const id = `ev-${event.key}-${target}`;
+  const on = set.isPending ? Boolean(set.variables) : !event.off.includes(target);
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <Label htmlFor={id} className="flex-1 font-normal">
+        {name}
+      </Label>
+      <Switch id={id} checked={on} onCheckedChange={(v) => set.mutate(v)} />
+      <ErrorLine error={set.error} />
+    </div>
+  );
+}
+
+function Events() {
+  const q = useQuery(integrationsQuery(false));
+  const { openSettings } = useShell();
+  if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  if (q.isError) return <ErrorLine error={q.error} />;
+  const targets = [
+    ...(q.data.ntfy.connected ? [{ id: 'ntfy', name: 'Phone (ntfy)', icon: BellIcon }] : []),
+    ...q.data.webhooks.map((h) => ({ id: h.id, name: h.name, icon: WebhookIcon })),
+  ];
+  if (!targets.length)
+    return (
+      <div className="grid grid-cols-1 gap-3">
+        <p className="text-sm">
+          Nothing to send to yet. Turn on ntfy for phone alerts, or add a webhook, in Integrations.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          className="justify-self-start"
+          onClick={() => openSettings('integrations')}
+        >
+          <PlugIcon />
+          Open Integrations
+        </Button>
+      </div>
+    );
+  return (
+    <div className="grid grid-cols-1 gap-5">
+      {q.data.events.map((e) => (
+        <section key={e.key} className="grid grid-cols-1 gap-2 border-b pb-4 last:border-b-0">
+          <div>
+            <h4 className="font-medium">{e.label}</h4>
+            <p className="text-xs text-muted-foreground">{e.detail}</p>
+          </div>
+          {targets.map((t) => (
+            <EventTarget key={t.id} event={e} target={t.id} name={t.name} icon={t.icon} />
+          ))}
+        </section>
+      ))}
+      <p className="text-xs text-muted-foreground">A new target starts with every event on.</p>
+    </div>
+  );
+}
+
 // ── the section ──
 
 function Integrations() {
@@ -1414,6 +1727,45 @@ function Integrations() {
       >
         <Robinhood status={q.data.robinhood} />
       </IntegrationRow>
+      <IntegrationRow
+        name="ntfy"
+        meta="Phone notifications through the ntfy app"
+        open={open === 'ntfy'}
+        onOpenChange={toggle('ntfy')}
+        badge={
+          q.data.ntfy.connected ? (
+            <TestBadge test={q.data.ntfy.last_test} />
+          ) : (
+            <Badge variant="outline">Off</Badge>
+          )
+        }
+      >
+        <Ntfy status={q.data.ntfy} />
+      </IntegrationRow>
+      <IntegrationRow
+        name="Webhooks"
+        meta="Events posted to your own addresses"
+        open={open === 'webhooks'}
+        onOpenChange={toggle('webhooks')}
+        badge={
+          q.data.webhooks.length ? (
+            q.data.webhooks.some((h) => h.last_test?.ok === false) ? (
+              <Badge variant="outline" className="text-loss">
+                <AlertTriangleIcon />
+                Failed
+              </Badge>
+            ) : (
+              <Badge variant="outline">
+                {q.data.webhooks.length} webhook{q.data.webhooks.length === 1 ? '' : 's'}
+              </Badge>
+            )
+          ) : (
+            <Badge variant="outline">None</Badge>
+          )
+        }
+      >
+        <Webhooks hooks={q.data.webhooks} />
+      </IntegrationRow>
     </div>
   );
 }
@@ -1481,8 +1833,15 @@ export const INTEGRATION_SETTINGS: SettingsSectionDef[] = [
     id: 'integrations',
     title: 'Integrations',
     icon: PlugIcon,
-    description: 'SnapTrade, Alpaca and Robinhood, with your own sign-ins.',
+    description: 'SnapTrade, Alpaca, Robinhood, ntfy and webhooks, with your own sign-ins.',
     content: <Integrations />,
+  },
+  {
+    id: 'events',
+    title: 'Events',
+    icon: BellRingIcon,
+    description: 'Choose where each event notifies you: your phone (ntfy) or your webhooks.',
+    content: <Events />,
   },
   {
     id: 'accounts',

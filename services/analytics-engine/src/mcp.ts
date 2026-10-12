@@ -483,14 +483,16 @@ function registerPortfolioTools(
   server.registerTool(
     'portfolio_lot_cost_write',
     {
-      title: 'Set a lot cost',
+      title: 'Set a lot cost or term',
       description:
         "Any account, SnapTrade's too: set the exact cost per share of one stock's lots acquired on " +
         'one day. Use it where portfolio_read shows a lot with cost_from estimate (the close that day, ' +
         'because the broker sent cost 0, as brokers often do for RSU, ESPP or transferred-in shares) ' +
         'or missing (no cost at all). For RSUs the cost is the value per share on the vest day, on the ' +
         "employer's stock plan statement or W-2. quantity picks one lot when several share a day; " +
-        'cost null clears yours. It outranks the broker and survives syncs. Example: ' +
+        "cost null clears yours. term (short or long) sets the lot's term by hand, for a derived or " +
+        'manual lot whose date misses the real holding period; null clears it, and either field left ' +
+        'out keeps what was set. Both outrank the broker and survive syncs. Example: ' +
         '{portfolio_id, underlying: "AMZN", acquired: "2025-05-21", cost: 201.12}. Returns the ' +
         'account as portfolio_read does.',
       inputSchema: lotCostWriteShape,

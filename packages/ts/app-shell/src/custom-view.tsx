@@ -56,6 +56,7 @@ import {
 } from './ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { EditCell } from './view-edit-cell';
 import { ViewEditDialog, type ViewEditorSection } from './view-editor';
 import {
@@ -184,12 +185,9 @@ const VIEW_SCROLL =
   '@container max-h-[calc(100svh-var(--shell-header-height)-var(--shell-status-height)-2*var(--shell-gutter))] overflow-auto';
 /** The table inside the view's scroller: it never scrolls on its own, so sticky rows pin to the view. */
 const IN_VIEW = '[&>[data-slot=table-container]]:overflow-visible';
-// `--head-top` is the column-group band's height when the table draws one (Bikram, 2026-10-12).
-const PINNED_BAND = 'sticky top-0 z-20 h-(--row-h) bg-card';
-const PINNED_HEAD =
-  'sticky top-(--head-top,0px) z-20 bg-card shadow-[inset_0_-1px_0_var(--color-border)]';
+const PINNED_HEAD = 'sticky top-0 z-20 bg-card shadow-[inset_0_-1px_0_var(--color-border)]';
 const PINNED_GROUP =
-  'sticky top-[calc(var(--head-top,0px)+var(--row-h)-1px)] z-10 bg-[color-mix(in_oklab,var(--color-muted)_50%,var(--color-card))] shadow-[inset_0_1px_0_var(--color-border),inset_0_-1px_0_var(--color-border)]';
+  'sticky top-[calc(var(--row-h)-1px)] z-10 bg-[color-mix(in_oklab,var(--color-muted)_50%,var(--color-card))] shadow-[inset_0_1px_0_var(--color-border),inset_0_-1px_0_var(--color-border)]';
 
 function SortIcon({ dir }: { dir: false | 'asc' | 'desc' }) {
   if (dir === 'asc') return <ArrowUpIcon className="size-3" />;
@@ -631,29 +629,22 @@ export function CustomViewPage<T extends RowData>({
   );
 }
 
-/**
- * The column-group band over the headers (Bikram, 2026-10-12): one cell per run of columns from
- * the same group (Holding, Symbol, Account, Formulas), drawn only when the columns span groups.
- */
-function bandsOf<T>(domain: ViewDomain<T>, shown: ViewField<T>[]) {
-  if (!domain.groups?.length) return null;
-  const runs: { id: string; label: string; color: string; span: number }[] = [];
-  for (const f of shown) {
-    const id = groupOf(domain, f);
-    const last = runs.at(-1);
-    if (last?.id === id) last.span++;
-    else {
-      const g = domain.groups.find((x) => x.id === id);
-      runs.push({
-        id,
-        label: id === FORMULAS_GROUP ? 'Formulas' : (g?.label ?? ''),
-        color: g?.color ?? 'var(--color-muted-foreground)',
-        span: 1,
-      });
-    }
-  }
-  return new Set(runs.map((r) => r.id)).size > 1 ? runs : null;
+/** A field's group colour (Holding, Symbol, Account, Formulas), for its header's rule. */
+function colorOf<T>(domain: ViewDomain<T>, f: ViewField<T> | undefined) {
+  if (!f || !domain.groups?.length) return null;
+  const id = groupOf(domain, f);
+  if (id === FORMULAS_GROUP) return 'var(--color-muted-foreground)';
+  return domain.groups.find((g) => g.id === id)?.color ?? null;
 }
+/** Where a field comes from, for its header's tooltip: Holding › Basket, Symbol › Analysts › Target. */
+function pathOf<T>(domain: ViewDomain<T>, f: ViewField<T>) {
+  const id = groupOf(domain, f);
+  const group = id === FORMULAS_GROUP ? 'Formulas' : domain.groups?.find((g) => g.id === id)?.label;
+  return [group, f.topic, f.label].filter(Boolean).join(' › ');
+}
+/** Every header carries its group's colour, text and a 2px rule (Bikram, 2026-10-12). */
+const ruleOf = (color: string | null) =>
+  color ? { boxShadow: `inset 0 -2px 0 ${color}` } : undefined;
 
 const alignOf = (format: ViewFormat) => (format === 'text' ? 'text-left' : 'text-right');
 
@@ -814,7 +805,6 @@ function RowsTable<T extends RowData>({
     return [...m];
   }, [groupBy, sorted]);
   const span = shown.length + (selection ? 1 : 0);
-  const bands = bandsOf(domain, shown);
   const keyOf = domain.rowKey;
   const toggle = (keys: string[], on: boolean) => {
     if (!selection) return;
@@ -894,24 +884,9 @@ function RowsTable<T extends RowData>({
   );
 
   return (
-    <div className={cn(paged ? IN_VIEW : 'overflow-x-auto', bands && '[--head-top:var(--row-h)]')}>
+    <div className={cn(paged ? IN_VIEW : 'overflow-x-auto')}>
       <Table>
         <TableHeader>
-          {bands && (
-            <TableRow className="hover:bg-transparent">
-              {selection && <TableHead className={PINNED_BAND} />}
-              {bands.map((b, i) => (
-                <TableHead
-                  key={`${b.id}:${i}`}
-                  colSpan={b.span}
-                  className={cn(PINNED_BAND, 'text-xs font-medium', i > 0 && 'border-l')}
-                  style={{ boxShadow: `inset 0 -2px 0 ${b.color}`, color: b.color }}
-                >
-                  {b.label}
-                </TableHead>
-              ))}
-            </TableRow>
-          )}
           {table.getHeaderGroups().map((hg) => (
             <TableRow key={hg.id}>
               {selection && (
@@ -927,6 +902,7 @@ function RowsTable<T extends RowData>({
                 <TableHead
                   key={h.id}
                   className={cn(alignOf(shown[i]?.format ?? 'text'), PINNED_HEAD)}
+                  style={ruleOf(colorOf(domain, shown[i]))}
                   aria-sort={
                     h.column.getIsSorted() === 'asc'
                       ? 'ascending'
@@ -950,15 +926,23 @@ function RowsTable<T extends RowData>({
                       {closed.size ? <ChevronsUpDownIcon /> : <ChevronsDownUpIcon />}
                     </Button>
                   )}
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className={cn('font-medium', !(i === 0 && groups) && '-mx-2')}
-                    onClick={h.column.getToggleSortingHandler()}
-                  >
-                    {flexRender(h.column.columnDef.header, h.getContext())}
-                    <SortIcon dir={h.column.getIsSorted()} />
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className={cn('font-medium', !(i === 0 && groups) && '-mx-2')}
+                        style={{ color: colorOf(domain, shown[i]) ?? undefined }}
+                        onClick={h.column.getToggleSortingHandler()}
+                      >
+                        {flexRender(h.column.columnDef.header, h.getContext())}
+                        <SortIcon dir={h.column.getIsSorted()} />
+                      </Button>
+                    </TooltipTrigger>
+                    {shown[i] && domain.groups?.length ? (
+                      <TooltipContent>{pathOf(domain, shown[i])}</TooltipContent>
+                    ) : null}
+                  </Tooltip>
                 </TableHead>
               ))}
             </TableRow>
@@ -1139,17 +1123,23 @@ function PivotTable<T>({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className={PINNED_HEAD}>
+            <TableHead className={PINNED_HEAD} style={ruleOf(colorOf(domain, rf))}>
               <span className="flex items-center gap-1.5">
                 <rf.icon className="size-3.5" />
-                {rf.label} \ {cf.label}
+                <span style={{ color: colorOf(domain, rf) ?? undefined }}>{rf.label}</span> \{' '}
+                <span style={{ color: colorOf(domain, cf) ?? undefined }}>{cf.label}</span>
                 <span className="font-normal text-muted-foreground">
-                  ({vf.label}, {pivot.agg})
+                  (<span style={{ color: colorOf(domain, vf) ?? undefined }}>{vf.label}</span>,{' '}
+                  {pivot.agg})
                 </span>
               </span>
             </TableHead>
             {grid.colKeys.map((c) => (
-              <TableHead key={c} className={cn('text-right', PINNED_HEAD)}>
+              <TableHead
+                key={c}
+                className={cn('text-right', PINNED_HEAD)}
+                style={ruleOf(colorOf(domain, cf))}
+              >
                 {c}
               </TableHead>
             ))}

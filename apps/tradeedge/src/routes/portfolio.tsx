@@ -3,11 +3,13 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
@@ -44,6 +46,7 @@ import { todayPT } from '@/lib/calendar';
 import {
   DASH,
   expLabel,
+  money,
   num,
   shortDate,
   signedPct,
@@ -821,6 +824,8 @@ interface LotRow {
   proceeds: number | null;
   gain: number | null;
   term: TaxLot['term'];
+  /** The term was set by hand. */
+  termYours: boolean;
   source: LotSource;
   /** The open lot itself, for its cost chip. */
   lot: TaxLot | null;
@@ -852,6 +857,7 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
         proceeds: null,
         gain: null,
         term: l.term,
+        termYours: l.term_from === 'yours',
         source: l.source,
         lot: l,
         before: l.before_history === true,
@@ -875,6 +881,7 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
         proceeds: c.proceeds,
         gain: c.gain,
         term: c.term,
+        termYours: c.term_from === 'yours',
         source: 'derived',
         lot: null,
         before: c.before_history === true,
@@ -1046,7 +1053,8 @@ const TAX_LOTS_BASE: ViewDomain<LotRow> = {
       icon: Hash,
       value: (l) => (l.account.tax_type === 'retirement' ? 'n/a' : TERM[l.term]),
       format: 'text',
-      formula: 'Long when held more than a year; n/a in a retirement account',
+      formula:
+        'Long when held more than a year, unless you set it in the lot; n/a in a retirement account',
       filterable: true,
       groupable: true,
     },
@@ -2068,16 +2076,13 @@ function useMask() {
   return (text: string) => (hidden ? maskAmount(text) : text);
 }
 
-function Facts({ items }: { items: [string, ReactNode][] }) {
+/** Facts as a two-row table: the labels as the header, the values under them. */
+function FactsTable({ items }: { items: [string, ReactNode][] }) {
   return (
-    <dl className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
-      {items.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-muted-foreground">{k}</dt>
-          <dd className="num">{v}</dd>
-        </div>
-      ))}
-    </dl>
+    <DetailsTable
+      head={items.map(([k], i) => ({ label: k, right: i > 0 }))}
+      rows={[{ key: 'values', cells: items.map(([, v]) => v) }]}
+    />
   );
 }
 
@@ -2145,35 +2150,49 @@ function SummaryDetails({ holding: h }: { holding: Holding }) {
       <ViewValueCell amount value={v} format="signed" />
     </span>
   );
+  const avgCost =
+    h.avg_cost === null ? (
+      DASH
+    ) : lotsOf(h).some((l) => l.cost_from === 'estimate') ? (
+      <span key="a" className="inline-flex items-center gap-1.5">
+        <CostChip
+          label="est."
+          tip={`The broker sent no average cost, so this is the average of the open lots, and some lot costs are estimates (the close on the acquired day; see Tax lots). ${FIX_COST}`}
+        />
+        {num(h.avg_cost)}
+      </span>
+    ) : (
+      num(h.avg_cost)
+    );
+  const position: [string, ReactNode][] = [
+    ['Quantity', m(num(h.quantity, h.quantity % 1 ? 4 : 0))],
+    ['Avg cost', avgCost],
+    ['Price', h.last === null ? DASH : num(h.last)],
+  ];
+  // Small tables, one header row and one value row each (Bikram, 2026-10-12): the share or the
+  // option, its value, then gains and dividends, then the accounts.
   return (
     <div className="flex flex-col gap-3">
-      <Facts
+      <FactsTable
+        items={
+          h.kind === 'Option'
+            ? [
+                ['Expiry', h.expiration ? expLabel(h.expiration) : DASH],
+                ['Strike', h.strike === null ? DASH : num(h.strike)],
+                ...position,
+              ]
+            : [['Symbol', h.symbol], ...position]
+        }
+      />
+      <FactsTable
         items={[
-          ['Symbol', h.symbol],
-          ['Kind', h.kind],
-          ['Expiry', h.expiration ? expLabel(h.expiration) : DASH],
-          ['Strike', h.strike === null ? DASH : num(h.strike)],
-          ['Quantity', m(num(h.quantity, h.quantity % 1 ? 4 : 0))],
-          [
-            'Avg cost',
-            h.avg_cost === null ? (
-              DASH
-            ) : lotsOf(h).some((l) => l.cost_from === 'estimate') ? (
-              <span key="a" className="inline-flex items-center gap-1.5">
-                <CostChip
-                  label="est."
-                  tip={`The broker sent no average cost, so this is the average of the open lots, and some lot costs are estimates (the close on the acquired day; see Tax lots). ${FIX_COST}`}
-                />
-                {num(h.avg_cost)}
-              </span>
-            ) : (
-              num(h.avg_cost)
-            ),
-          ],
-          ['Price', h.last === null ? DASH : num(h.last)],
           ['Cost basis', <ViewValueCell key="b" amount value={basis(h)} format="price" />],
           ['Value', <ViewValueCell key="v" amount value={value(h)} format="price" />],
           ['Unrealized', <ViewValueCell key="u" amount value={unrealized(h)} format="signed" />],
+        ]}
+      />
+      <FactsTable
+        items={[
           ['Realized', gains(realized(h))],
           ['Realized YTD', gains(realized(h, year))],
           ['Dividends', <ViewValueCell key="d" amount value={dividends(h)} format="signed" />],
@@ -2196,10 +2215,13 @@ function SummaryDetails({ holding: h }: { holding: Holding }) {
 function DetailsTable({
   head,
   rows,
+  foot,
 }: {
   /** `grow` marks the column that takes the spare width; the last column does by default. */
   head: { label: string; right?: boolean; grow?: boolean }[];
   rows: { key: string; cells: ReactNode[] }[];
+  /** An optional total row, one cell per column. */
+  foot?: ReactNode[];
 }) {
   const marked = head.findIndex((h) => h.grow);
   const grow = marked >= 0 ? marked : head.length - 1;
@@ -2233,6 +2255,21 @@ function DetailsTable({
             </TableRow>
           ))}
         </TableBody>
+        {foot && (
+          <TableFooter>
+            <TableRow>
+              {foot.map((c, i) => (
+                <TableCell
+                  // biome-ignore lint/suspicious/noArrayIndexKey: cells are positional
+                  key={i}
+                  className={cn('num', head[i]?.right && 'text-right', i !== grow && 'w-px')}
+                >
+                  {c}
+                </TableCell>
+              ))}
+            </TableRow>
+          </TableFooter>
+        )}
       </Table>
     </div>
   );
@@ -2382,6 +2419,44 @@ function SetCost({ row: l }: { row: LotRow }) {
   );
 }
 
+/**
+ * A lot's term and a pick to set it by hand (Bikram, 2026-10-12): Auto follows the holding period;
+ * Long or Short is yours for that symbol's lots acquired that day, kept across syncs (PUT lot-costs).
+ */
+function SetTerm({ row: l }: { row: LotRow }) {
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (term: 'short' | 'long' | null) =>
+      writeLotCost(l.account.id, { underlying: l.symbol, acquired: l.acquired, term }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['portfolios'] }),
+  });
+  if (OCC.test(l.symbol)) return <>{TERM[l.term]}</>;
+  return (
+    <Select
+      value={l.termYours ? l.term : 'auto'}
+      onValueChange={(v) => save.mutate(v === 'auto' ? null : (v as 'short' | 'long'))}
+      disabled={save.isPending}
+    >
+      <SelectTrigger
+        size="sm"
+        aria-label={`Term of ${l.symbol} acquired ${l.acquired}`}
+        className="h-6 border-transparent px-1.5 text-xs shadow-none hover:border-input"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span>
+          {TERM[l.term]}
+          {l.termYours ? <span className="text-muted-foreground"> · yours</span> : null}
+        </span>
+      </SelectTrigger>
+      <SelectContent position="popper" align="end">
+        <SelectItem value="auto">Auto (by holding period)</SelectItem>
+        <SelectItem value="long">Long</SelectItem>
+        <SelectItem value="short">Short</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
 /** The holding's tax lots, open and closed, in every account it spans; All / Open / Closed picks. */
 function LotDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
@@ -2391,6 +2466,16 @@ function LotDetails({ holding: h }: { holding: Holding }) {
   const all = parts.flatMap((p) => lotRows([p.account]).filter((l) => l.symbol === h.symbol));
   const lots = show === 'all' ? all : all.filter((l) => l.status === show);
   const amount = (v: number | null) => (v === null ? DASH : m(num(v)));
+  // Total row (Bikram, 2026-10-12): shares in total; cost and sell price as the per-share
+  // average over the lots that have one; gain summed over the lots with a gain.
+  const avg = (pick: (l: LotRow) => number | null) => {
+    const known = lots.filter((l) => pick(l) !== null);
+    const qty = known.reduce((t, l) => t + Math.abs(l.quantity), 0);
+    return qty ? known.reduce((t, l) => t + (pick(l) ?? 0) * Math.abs(l.quantity), 0) / qty : null;
+  };
+  const totalQty = lots.reduce((t, l) => t + l.quantity, 0);
+  const gains = lots.filter((l) => l.gain !== null);
+  const totalGain = gains.length ? gains.reduce((t, l) => t + (l.gain ?? 0), 0) : null;
   return (
     <div className="flex flex-col gap-2">
       <ShowToggle value={show} onChange={setShow} />
@@ -2432,10 +2517,32 @@ function LotDetails({ holding: h }: { holding: Holding }) {
                 </span>
               ),
               // Retirement accounts are not taxed on sales, so lots carry no term.
-              l.account.tax_type === 'retirement' ? 'n/a' : TERM[l.term],
+              l.account.tax_type === 'retirement' ? 'n/a' : <SetTerm key="t" row={l} />,
               <SourceChip key="s" lot={l} />,
             ],
           }))}
+          foot={
+            lots.length > 1
+              ? [
+                  'Total',
+                  ...(many ? [''] : []),
+                  '',
+                  '',
+                  m(num(totalQty, totalQty % 1 ? 4 : 0)),
+                  amount(avg((l) => l.cost)),
+                  amount(avg((l) => (l.status === 'closed' ? l.sell : null))),
+                  totalGain === null ? (
+                    DASH
+                  ) : (
+                    <span key="g" className={toneClass(totalGain)}>
+                      {m(usd(totalGain))}
+                    </span>
+                  ),
+                  '',
+                  '',
+                ]
+              : undefined
+          }
         />
       ) : (
         <p className="text-sm text-muted-foreground">
@@ -2537,7 +2644,7 @@ function TransactionDetails({ holding: h }: { holding: Holding }) {
                 : movesOf(t.kind) === 'transfer'
                   ? m(num(t.quantity, t.quantity % 1 ? 4 : 0))
                   : `${m(num(t.quantity, t.quantity % 1 ? 4 : 0))} @ ${num(t.price)}`,
-              m(usd(t.amount)),
+              m(money(t.amount)),
             ],
           }))}
         />
