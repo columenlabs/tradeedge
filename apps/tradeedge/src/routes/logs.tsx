@@ -35,6 +35,8 @@ const CATEGORY: Record<LogEntry['category'], string> = {
   user: 'User',
   backend: 'Backend',
   x: 'X',
+  news: 'News',
+  earnings: 'Earnings',
   schedules: 'Schedules',
 };
 

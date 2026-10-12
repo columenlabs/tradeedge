@@ -2,11 +2,14 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
+  type EarningsRow,
+  POST_SOURCES,
   type Post,
   type PostDomain,
   type PostView,
   THEMES,
   deletePostView,
+  earningsQuery,
   integrationsQuery,
   postViewPath,
   postViewsQuery,
@@ -14,8 +17,8 @@ import {
   savePostView,
 } from '@/lib/api';
 /**
- * Posts (Bikram, 2026-10-12): what the X accounts the person tracks post, tagged with symbols, a
- * macro theme and sentiment. Three app views (Feed, By symbol, Macro), read-only; Duplicate copies
+ * Posts (Bikram, 2026-10-12): what the X accounts the person tracks post and the news their own
+ * Alpaca key reads, tagged with symbols, a macro theme and sentiment, each with its Source. Three app views (Feed, By symbol, Macro), read-only; Duplicate copies
  * one into a view of the person's own. Feed and Macro read one row per post (`posts`), By symbol
  * one row per post and symbol it names (`post_symbols`).
  */
@@ -34,7 +37,10 @@ import { appView } from '@edgedesk/types/views';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import {
+  ArrowUpRight,
   AtSign,
+  CalendarDays,
+  CircleCheck,
   Clock,
   Copy,
   DollarSign,
@@ -43,13 +49,25 @@ import {
   Globe,
   Hash,
   MessageSquareText,
+  Newspaper,
   Percent,
   PlugIcon,
   Smile,
   User,
 } from 'lucide-react';
 
-type Row = Post & { key: string; symbol?: string };
+/** `parts`: the post's repeats only, which a chevron opens under it (Bikram, 2026-10-12). */
+type Row = Post & { key: string; symbol?: string; parts: Row[] };
+
+/** `@zerohedge` for an X account, `Benzinga` for a news publisher, `SEC 8-K` for an earnings line. */
+const who = (p: Post) =>
+  p.source === 'sec'
+    ? 'SEC 8-K'
+    : p.source === 'alpaca'
+      ? p.handle.charAt(0).toUpperCase() + p.handle.slice(1)
+      : `@${p.handle}`;
+const linkLabel = (p: Post) =>
+  p.source === 'sec' ? 'Open filing' : p.source === 'alpaca' ? 'Open article' : 'Open on X';
 
 const mood = (s: number | null) =>
   s === null ? null : s > 0.15 ? 'Bullish' : s < -0.15 ? 'Bearish' : 'Neutral';
@@ -95,10 +113,19 @@ const fields: ViewField<Row>[] = [
     render: (p) => <When iso={p.at} />,
   },
   {
+    key: 'source',
+    label: 'Source',
+    icon: Newspaper,
+    value: (p) => POST_SOURCES[p.source ?? 'x'],
+    format: 'text',
+    filterable: true,
+    groupable: true,
+  },
+  {
     key: 'handle',
     label: 'Account',
     icon: AtSign,
-    value: (p) => `@${p.handle}`,
+    value: who,
     format: 'text',
     filterable: true,
     groupable: true,
@@ -173,9 +200,18 @@ const fields: ViewField<Row>[] = [
     value: (p) => p.url,
     format: 'text',
     render: (p) => (
-      <a href={p.url} target="_blank" rel="noreferrer" className="underline">
-        Open
-      </a>
+      <Button variant="ghost" size="icon-xs" asChild>
+        <a
+          href={p.url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={linkLabel(p)}
+          title={linkLabel(p)}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ArrowUpRight />
+        </a>
+      </Button>
     ),
   },
 ];
@@ -188,7 +224,16 @@ const symbolsField: ViewField<Row> = {
   values: (p) => p.symbols,
   format: 'text',
   filterable: true,
-  note: 'Workers AI',
+  note: 'Workers AI; news: its publisher',
+  // News can name 20+ tickers: two lines at most, the full list on hover (Bikram, 2026-10-12).
+  render: (p) => (
+    <span
+      className="line-clamp-2 block min-w-24 max-w-48 whitespace-normal"
+      title={p.symbols.join(' ')}
+    >
+      {p.symbols.join(' ') || '–'}
+    </span>
+  ),
 };
 const symbolField: ViewField<Row> = {
   key: 'symbol',
@@ -198,37 +243,43 @@ const symbolField: ViewField<Row> = {
   format: 'text',
   filterable: true,
   groupable: true,
-  note: 'Workers AI',
+  note: 'Workers AI; news: its publisher',
 };
 
-const DOMAINS: Record<PostDomain, ViewDomain<Row>> = {
+type FeedDomain = Exclude<PostDomain, 'earnings'>;
+const DOMAINS: Record<FeedDomain, ViewDomain<Row>> = {
   posts: {
     id: 'posts',
     rowKey: (p) => p.key,
     text: (p) => [p.text, p.name],
-    fields: [...fields.slice(0, 4), symbolsField, ...fields.slice(4)],
+    fields: [...fields.slice(0, 5), symbolsField, ...fields.slice(5)],
+    parts: { label: 'Repeats', by: 'handle', rows: (p) => p.parts, others: true },
   },
   post_symbols: {
     id: 'post_symbols',
     rowKey: (p) => p.key,
     text: (p) => [p.text, p.name],
     fields: [symbolField, ...fields],
+    parts: { label: 'Repeats', by: 'handle', rows: (p) => p.parts, others: true },
   },
 };
 
-/** One row per post, or one per post and symbol it names. */
-const rowsOf = (posts: Post[], domain: PostDomain): Row[] =>
-  domain === 'posts'
-    ? posts.map((p) => ({ ...p, key: p.id }))
-    : posts.flatMap((p) => p.symbols.map((symbol) => ({ ...p, symbol, key: `${p.id}:${symbol}` })));
+/** One row per post, or one per post and symbol it names; each opens its repeats. */
+function rowsOf(posts: Post[], domain: FeedDomain): Row[] {
+  const row = (p: Post, key: string, symbol?: string): Row => {
+    const self: Row = { ...p, key, symbol, parts: [] };
+    self.parts = (p.repeats ?? []).map((r) => ({ ...r, key: `${key}:${r.id}`, symbol, parts: [] }));
+    return self;
+  };
+  return domain === 'posts'
+    ? posts.map((p) => row(p, p.id))
+    : posts.flatMap((p) => p.symbols.map((symbol) => row(p, `${p.id}:${symbol}`, symbol)));
+}
 
-function PostViewBody({ view }: { view: PostView }) {
+/** Save, Duplicate and Delete of a view under Posts, and the app views' Duplicate button. */
+function useViewActions(view: PostView) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const { openSettings } = useShell();
-  const { timeZone } = usePrefs();
-  const posts = useQuery(postsQuery());
-  const x = useQuery(integrationsQuery(false)).data?.x;
   const config: CustomViewConfig = { name: view.name, ...view.config };
   const listKey = postViewsQuery().queryKey;
   const save = useMutation({
@@ -252,49 +303,62 @@ function PostViewBody({ view }: { view: PostView }) {
       void navigate({ to: '/posts/$id', params: { id: 'feed' } });
     },
   });
-  const rows = x && !x.connected ? [] : rowsOf(posts.data?.posts ?? [], view.domain);
+  return {
+    key: `posts:${view.domain}:${view.id}:${view.updated_at}`,
+    viewId: view.app ? undefined : view.id,
+    crumbs: [{ label: 'Posts' }, { label: view.name }],
+    config,
+    onConfigChange: view.app ? undefined : (c: CustomViewConfig) => save.mutate(c),
+    onDuplicate: view.app ? undefined : () => copy.mutate(),
+    onDelete: view.app ? undefined : () => remove.mutate(),
+    actions: view.app && (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Duplicate view"
+            disabled={copy.isPending}
+            onClick={() => copy.mutate()}
+          >
+            <Copy />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Duplicate into a view of your own</TooltipContent>
+      </Tooltip>
+    ),
+  };
+}
+
+function PostViewBody({ view, domain }: { view: PostView; domain: FeedDomain }) {
+  const { openSettings } = useShell();
+  const { timeZone } = usePrefs();
+  const posts = useQuery(postsQuery());
+  const status = useQuery(integrationsQuery(false)).data;
+  const x = status?.x;
+  const alpaca = status?.alpaca;
+  const { key, ...frame } = useViewActions(view);
+  const notConnected = !!status && !x?.connected && !alpaca?.connected;
+  const rows = notConnected ? [] : rowsOf(posts.data?.posts ?? [], domain);
   const check = x?.connected ? x.last_check : null;
-  const notConnected = x && !x.connected;
+  const news = alpaca?.connected ? alpaca.last_news : null;
   return (
     <CustomViewPage
-      key={`posts:${view.domain}:${view.id}:${view.updated_at}`}
-      viewId={view.app ? undefined : view.id}
-      crumbs={[{ label: 'Posts' }, { label: view.name }]}
-      domain={DOMAINS[view.domain]}
-      config={config}
+      key={key}
+      {...frame}
+      domain={DOMAINS[domain]}
       rows={rows}
-      onConfigChange={view.app ? undefined : (c) => save.mutate(c)}
-      onDuplicate={view.app ? undefined : () => copy.mutate()}
-      onDelete={view.app ? undefined : () => remove.mutate()}
-      actions={
-        view.app && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                aria-label="Duplicate view"
-                disabled={copy.isPending}
-                onClick={() => copy.mutate()}
-              >
-                <Copy />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Duplicate into a view of your own</TooltipContent>
-          </Tooltip>
-        )
-      }
-      rowTitle={(p) => `@${p.handle}${p.symbol ? ` · ${p.symbol}` : ''}`}
+      rowTitle={(p) => `${who(p)}${p.symbol ? ` · ${p.symbol}` : ''}`}
       state={
         notConnected ? (
           <div className="grid justify-items-start gap-3 rounded-lg border p-6">
             <p className="text-sm">
-              Connect X to see posts from the accounts you track: your own twitterapi.io key, in
-              Settings ▸ Integrations.
+              Connect X to see posts from the accounts you track (your own twitterapi.io key), or
+              Alpaca to see the news (your own Alpaca key), in Settings ▸ Integrations.
             </p>
             <Button size="sm" variant="outline" onClick={() => openSettings('integrations')}>
               <PlugIcon />
-              Connect X
+              Open Integrations
             </Button>
           </div>
         ) : posts.data ? undefined : posts.isError ? (
@@ -309,9 +373,21 @@ function PostViewBody({ view }: { view: PostView }) {
           {posts.data ? <StatusItem label="Kept" value={posts.data.kept} /> : null}
           {check ? (
             <StatusItem
-              label="Checked"
+              label="X checked"
               ok={check.ok}
               value={new Date(check.at).toLocaleString('en-US', {
+                timeZone,
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short',
+              })}
+            />
+          ) : null}
+          {news ? (
+            <StatusItem
+              label="News checked"
+              ok={news.ok}
+              value={new Date(news.at).toLocaleString('en-US', {
                 timeZone,
                 hour: 'numeric',
                 minute: '2-digit',
@@ -328,8 +404,172 @@ function PostViewBody({ view }: { view: PostView }) {
   );
 }
 
+/** One row per symbol's next report (Robinhood calendar) with its last 8-K one-liner (SEC). */
+type EarningsViewRow = EarningsRow & { key: string };
+const earningsFields: ViewField<EarningsViewRow>[] = [
+  {
+    key: 'symbol',
+    label: 'Symbol',
+    icon: DollarSign,
+    value: (e) => e.symbol,
+    format: 'text',
+    filterable: true,
+  },
+  {
+    key: 'date',
+    label: 'Report',
+    icon: CalendarDays,
+    value: (e) => e.date,
+    format: 'text',
+    filterable: true,
+    groupable: true,
+    render: (e) => (
+      <span className="num whitespace-nowrap">
+        {new Date(`${e.date}T12:00:00Z`).toLocaleDateString('en-US', {
+          timeZone: 'UTC',
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+        })}
+      </span>
+    ),
+  },
+  {
+    key: 'timing',
+    label: 'When',
+    icon: Clock,
+    value: (e) =>
+      e.timing === 'am' ? 'Before open' : e.timing === 'pm' ? 'After close' : 'Not known',
+    format: 'text',
+    filterable: true,
+    groupable: true,
+  },
+  {
+    key: 'confirmed',
+    label: 'Confirmed',
+    icon: CircleCheck,
+    value: (e) => (e.verified ? 'Confirmed' : 'Expected'),
+    format: 'text',
+    filterable: true,
+    groupable: true,
+  },
+  {
+    key: 'eps_estimate',
+    label: 'EPS est',
+    icon: Hash,
+    value: (e) => e.eps_estimate,
+    format: 'price',
+    filterable: true,
+    note: 'Robinhood',
+  },
+  {
+    key: 'last',
+    label: 'Last result',
+    icon: MessageSquareText,
+    value: (e) => e.last?.line ?? null,
+    format: 'text',
+    note: 'SEC 8-K, Workers AI',
+    render: (e) =>
+      e.last ? (
+        <span className="line-clamp-2 block min-w-64 max-w-md whitespace-normal">
+          {e.last.line}
+        </span>
+      ) : (
+        <span className="text-muted-foreground">–</span>
+      ),
+  },
+  {
+    key: 'reported_at',
+    label: 'Reported',
+    icon: Clock,
+    value: (e) => e.last?.at ?? null,
+    format: 'text',
+    render: (e) =>
+      e.last ? <When iso={e.last.at} /> : <span className="text-muted-foreground">–</span>,
+  },
+  {
+    key: 'url',
+    label: 'Filing',
+    icon: ExternalLink,
+    value: (e) => e.last?.url ?? null,
+    format: 'text',
+    render: (e) =>
+      e.last ? (
+        <Button variant="ghost" size="icon-xs" asChild>
+          <a
+            href={e.last.url}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open filing"
+            title="Open filing"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <ArrowUpRight />
+          </a>
+        </Button>
+      ) : null,
+  },
+];
+const EARNINGS: ViewDomain<EarningsViewRow> = {
+  id: 'earnings',
+  rowKey: (e) => e.key,
+  text: (e) => [e.symbol, e.last?.line ?? ''],
+  fields: earningsFields,
+};
+
+function EarningsViewBody({ view }: { view: PostView }) {
+  const { openSettings } = useShell();
+  const { timeZone } = usePrefs();
+  const q = useQuery(earningsQuery());
+  const { key, ...frame } = useViewActions(view);
+  const rows = (q.data?.rows ?? []).map((e) => ({ ...e, key: e.symbol }));
+  return (
+    <CustomViewPage
+      key={key}
+      {...frame}
+      domain={EARNINGS}
+      rows={rows}
+      rowTitle={(e) => e.symbol}
+      state={
+        q.data && !q.data.connected ? (
+          <div className="grid justify-items-start gap-3 rounded-lg border p-6">
+            <p className="text-sm">
+              Connect Robinhood in Settings ▸ Integrations to see when the symbols you hold or watch
+              report, with the EPS estimate, and a one-line result from the SEC filing.
+            </p>
+            <Button size="sm" variant="outline" onClick={() => openSettings('integrations')}>
+              <PlugIcon />
+              Open Integrations
+            </Button>
+          </div>
+        ) : q.data ? undefined : q.isError ? (
+          <ErrorNote>{q.error.message}</ErrorNote>
+        ) : (
+          <Skeleton className="h-96 w-full" />
+        )
+      }
+      status={
+        q.data?.refreshed_at ? (
+          <StatusItem
+            label="Calendar"
+            value={new Date(q.data.refreshed_at).toLocaleString('en-US', {
+              timeZone,
+              month: 'short',
+              day: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+            })}
+          />
+        ) : null
+      }
+    />
+  );
+}
+
 function PostViewFind({ domain, id }: { domain?: PostDomain; id: string }) {
-  const app = domain ? undefined : (appView('posts', id) ?? appView('post_symbols', id));
+  const app = domain
+    ? undefined
+    : (appView('posts', id) ?? appView('post_symbols', id) ?? appView('earnings', id));
   const views = useQuery({ ...postViewsQuery(), enabled: !app });
   const view = app
     ? ({ ...app, created_at: '', updated_at: '' } as PostView)
@@ -347,7 +587,11 @@ function PostViewFind({ domain, id }: { domain?: PostDomain; id: string }) {
       </Page>
     );
   }
-  return <PostViewBody view={view} />;
+  return view.domain === 'earnings' ? (
+    <EarningsViewBody view={view} />
+  ) : (
+    <PostViewBody view={view} domain={view.domain} />
+  );
 }
 
 /** `/posts/$id`: an app view (Feed, By symbol, Macro). */

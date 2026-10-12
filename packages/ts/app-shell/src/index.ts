@@ -18,6 +18,20 @@ export {
 export { ConfirmDelete, type ConfirmDeleteProps } from './confirm';
 export { DrawerSection, type DrawerSectionProps } from './drawer-section';
 export { DESKS, type Desk, type DeskId } from './desks';
+export {
+  type ChartMarker,
+  GrowthChart,
+  KEY_DATE_KINDS,
+  KeyDateChips,
+  type KeyDateKind,
+  type KeyDateMarker,
+  PALETTE,
+  type Scale,
+  type Series,
+  benchColour,
+  keyDateMarkers,
+  paletteAt,
+} from './growth-chart';
 export { SIGN_OUT_URL, type Identity, useIdentity } from './identity';
 export {
   NavGroup,

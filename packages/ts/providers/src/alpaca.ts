@@ -41,6 +41,29 @@ export interface AlpacaConfig {
   today?: () => number;
 }
 
+/** One news article (Benzinga, through Alpaca). */
+export interface NewsArticle {
+  id: string;
+  headline: string;
+  summary: string;
+  author: string;
+  /** Where it was published, e.g. `benzinga`. */
+  source: string;
+  url: string;
+  symbols: string[];
+  /** ISO. */
+  createdAt: string;
+}
+interface RawNews {
+  id: number | string;
+  headline?: string;
+  summary?: string;
+  author?: string;
+  source?: string;
+  url?: string;
+  symbols?: unknown[];
+  created_at?: string;
+}
 interface RawQuote {
   ap?: number;
   as?: number;
@@ -265,6 +288,47 @@ export class AlpacaClient implements LiveOptionsProvider, AssetLookup, SplitLook
       active: body.status === 'active',
       tradable: !!body.tradable,
     };
+  }
+
+  /**
+   * News articles (Benzinga) created from `start` (ISO), all symbols, oldest first (or newest with
+   * `sort: 'desc'`); at most `pages` pages of `limit` (50). `/v1beta1/news`.
+   */
+  async getNews(q: {
+    start: string;
+    pages?: number;
+    limit?: number;
+    sort?: 'asc' | 'desc';
+  }): Promise<NewsArticle[]> {
+    const { start, pages = 4, limit = 50, sort = 'asc' } = q;
+    const out: NewsArticle[] = [];
+    let pageToken: string | undefined;
+    for (let i = 0; i < pages; i++) {
+      const body = await this.get<{ news?: RawNews[]; next_page_token?: string | null }>(
+        this.dataUrl,
+        '/v1beta1/news',
+        {
+          start,
+          sort,
+          limit: String(limit),
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      );
+      for (const n of body.news ?? [])
+        out.push({
+          id: String(n.id),
+          headline: n.headline ?? '',
+          summary: n.summary ?? '',
+          author: n.author ?? '',
+          source: n.source ?? '',
+          url: n.url ?? '',
+          symbols: Array.isArray(n.symbols) ? n.symbols.map(String) : [],
+          createdAt: n.created_at ?? '',
+        });
+      if (!body.next_page_token) break;
+      pageToken = body.next_page_token;
+    }
+    return out;
   }
 
   private async get<T>(base: string, path: string, params: Record<string, string>): Promise<T> {

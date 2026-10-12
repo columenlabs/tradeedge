@@ -553,6 +553,13 @@ export class Portfolios {
     );
   }
 
+  /** Every ticker held, shares or option underlyings, across the person's accounts. */
+  async heldSymbols(owner: string): Promise<string[]> {
+    const v = await this.vault.for(owner);
+    const held = (await this.accounts(v)).flatMap((a) => a.positions.map((p) => p.underlying));
+    return [...new Set(held)].sort();
+  }
+
   async read(owner: string, id: string): Promise<Portfolio> {
     const v = await this.vault.for(owner);
     const [account] = await this.accounts(v, id);
@@ -631,6 +638,38 @@ export class Portfolios {
         lots.get(head.id)?.lots ?? null,
       ]),
     );
+  }
+
+  /**
+   * Every account with its positions, cash and transactions, and the splits of the stocks traded
+   * (Performance: values are worked out from these on each read, nothing is stored).
+   */
+  async ledger(owner: string) {
+    const v = await this.vault.for(owner);
+    const [heads, months] = await Promise.all([this.accounts(v), this.buckets(v)]);
+    const accounts = heads.map((a) => ({
+      id: a.id,
+      name: a.name,
+      broker: a.broker,
+      tax_type: a.tax_type,
+      cash: a.cash,
+      positions: a.positions,
+      rows: (months.get(a.id) ?? []).flatMap((m) => m.rows).sort(byDateThenId),
+    }));
+    return { accounts, splits: await this.splitsOf(accounts.flatMap((a) => a.rows)) };
+  }
+
+  /** Every account with its cash and positions, without transactions or lots (Autopilot's sleeves). */
+  async holdings(owner: string) {
+    const v = await this.vault.for(owner);
+    return (await this.accounts(v)).map((a) => ({
+      id: a.id,
+      name: a.name,
+      tax_type: a.tax_type,
+      source: a.source,
+      cash: a.cash,
+      positions: a.positions,
+    }));
   }
 
   /** The owner's account, or not found. */

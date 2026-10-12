@@ -458,8 +458,9 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
       filters: { fields: ['brokerage', 'tax_type', 'source', 'trading'], default: [] },
     }),
   },
-  // Posts (Bikram, 2026-10-12): what the X accounts a person tracks post, tagged. Feed and Macro
-  // read one row per post; By symbol one row per post and symbol it names.
+  // Posts (Bikram, 2026-10-12): what the X accounts a person tracks post and the news their Alpaca
+  // key reads, tagged, each with its Source. Feed and Macro read one row per post; By symbol one row
+  // per post and symbol it names.
   {
     id: 'feed',
     app: true,
@@ -469,11 +470,17 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
     name: 'Feed',
     config: customViewConfigSchema.parse({
       shape: 'table',
-      columns: ['at', 'handle', 'text', 'symbols', 'theme', 'sentiment'],
-      chips: [{ key: 'theme', placement: 'column' }],
+      columns: ['at', 'source', 'handle', 'text', 'symbols', 'theme', 'sentiment', 'url'],
+      chips: [
+        { key: 'source', placement: 'column' },
+        { key: 'theme', placement: 'column' },
+      ],
       icon: 'rss',
-      group: { fields: ['handle', 'theme', 'mood'], default: null },
-      filters: { fields: ['handle', 'symbols', 'theme', 'mood', 'sentiment'], default: [] },
+      group: { fields: ['source', 'handle', 'theme', 'mood'], default: null },
+      filters: {
+        fields: ['source', 'handle', 'symbols', 'theme', 'mood', 'sentiment'],
+        default: [],
+      },
       sort: { key: 'at', desc: true },
     }),
   },
@@ -486,10 +493,10 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
     name: 'By symbol',
     config: customViewConfigSchema.parse({
       shape: 'group',
-      columns: ['symbol', 'posts', 'sentiment', 'handle', 'at', 'text'],
+      columns: ['symbol', 'posts', 'sentiment', 'source', 'handle', 'at', 'text', 'url'],
       icon: 'dollar-sign',
-      group: { fields: ['symbol', 'handle', 'theme'], default: 'symbol' },
-      filters: { fields: ['symbol', 'handle', 'theme', 'mood'], default: [] },
+      group: { fields: ['symbol', 'source', 'handle', 'theme'], default: 'symbol' },
+      filters: { fields: ['symbol', 'source', 'handle', 'theme', 'mood'], default: [] },
       sort: { key: 'at', desc: true },
     }),
   },
@@ -502,11 +509,30 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
     name: 'Macro',
     config: customViewConfigSchema.parse({
       shape: 'group',
-      columns: ['theme', 'posts', 'sentiment', 'handle', 'at', 'text', 'symbols'],
+      columns: ['theme', 'posts', 'sentiment', 'source', 'handle', 'at', 'text', 'symbols', 'url'],
       icon: 'globe',
-      group: { fields: ['theme', 'handle', 'mood'], default: 'theme' },
-      filters: { fields: ['theme', 'handle', 'symbols', 'mood'], default: [] },
+      group: { fields: ['theme', 'source', 'handle', 'mood'], default: 'theme' },
+      filters: { fields: ['theme', 'source', 'handle', 'symbols', 'mood'], default: [] },
       sort: { key: 'at', desc: true },
+    }),
+  },
+  // Earnings (Bikram, 2026-10-12): the next report of each symbol held or watched, from the person's
+  // Robinhood sign-in, with the last 8-K one-liner found.
+  {
+    id: 'earnings',
+    app: true,
+    desk: 'trade',
+    domain: 'earnings',
+    owner: null,
+    name: 'Earnings',
+    config: customViewConfigSchema.parse({
+      shape: 'table',
+      columns: ['symbol', 'date', 'timing', 'eps_estimate', 'last', 'url'],
+      chips: [{ key: 'timing', placement: 'column' }],
+      icon: 'calendar',
+      group: { fields: ['date', 'timing', 'confirmed'], default: null },
+      filters: { fields: ['symbol', 'date', 'timing', 'confirmed'], default: [] },
+      sort: { key: 'date', desc: false },
     }),
   },
   {
@@ -712,6 +738,7 @@ export const customViewFields: Record<
   posts: {
     columns: [
       'at',
+      'source',
       'handle',
       'name',
       'text',
@@ -724,13 +751,14 @@ export const customViewFields: Record<
       'posts',
       'url',
     ],
-    group: ['handle', 'theme', 'mood'],
-    filter: ['handle', 'symbols', 'theme', 'mood', 'sentiment'],
+    group: ['source', 'handle', 'theme', 'mood'],
+    filter: ['source', 'handle', 'symbols', 'theme', 'mood', 'sentiment'],
   },
   post_symbols: {
     columns: [
       'symbol',
       'at',
+      'source',
       'handle',
       'name',
       'text',
@@ -742,8 +770,22 @@ export const customViewFields: Record<
       'posts',
       'url',
     ],
-    group: ['symbol', 'handle', 'theme', 'mood'],
-    filter: ['symbol', 'handle', 'theme', 'mood', 'sentiment'],
+    group: ['symbol', 'source', 'handle', 'theme', 'mood'],
+    filter: ['symbol', 'source', 'handle', 'theme', 'mood', 'sentiment'],
+  },
+  earnings: {
+    columns: [
+      'symbol',
+      'date',
+      'timing',
+      'confirmed',
+      'eps_estimate',
+      'last',
+      'reported_at',
+      'url',
+    ],
+    group: ['date', 'timing', 'confirmed'],
+    filter: ['symbol', 'date', 'timing', 'confirmed', 'eps_estimate'],
   },
   logs: {
     columns: ['at', 'category', 'what', 'outcome', 'ms', 'detail'],

@@ -116,7 +116,16 @@ export interface ViewDomain<T> {
   merge?: { key: (row: T) => string; rows: (rows: T[]) => T };
   /** A folded row's own rows, shown as a table at the top of its details drawer, first column
    *  `by` (the field they differ on), then the view's columns (Bikram, 2026-10-09). */
-  parts?: { label: string; by: string; rows: (row: T) => T[] };
+  parts?: {
+    label: string;
+    by: string;
+    rows: (row: T) => T[];
+    /** `rows` are the other rows only, not the row itself, so one is enough to open (Bikram,
+     *  2026-10-12: a post's repeats). By default they include it and need two. */
+    others?: boolean;
+  };
+  /** What a row's chevron opens, one level only, and each child's name for the first column. */
+  expand?: (row: T) => { label: string; rows: T[]; name?: (row: T) => string };
 }
 
 /** Rolls values up; nulls are skipped and an empty set is null (count is 0). */

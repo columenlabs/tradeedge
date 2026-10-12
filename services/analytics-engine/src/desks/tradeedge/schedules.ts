@@ -6,7 +6,14 @@
  *   x_market     Check X in market hours: every 2 min, 6:30 AM to 1:00 PM Pacific, Mon to Fri,
  *                NYSE holidays skipped (they count as outside hours)
  *   x_outside    Check X outside market hours: every 4 h, whenever x_market's window is closed
+ *   news_market  Check news in market hours: every 2 min in its own window (like x_market), with the
+ *                person's Alpaca key (Bikram, 2026-10-12)
+ *   news_outside Check news outside market hours: every 4 h, whenever news_market's window is closed
  *   posts_prune  Prune old posts: daily at 2:00 AM Pacific, removes D1 posts past 30 days
+ *   earnings_calendar  Refresh earnings calendar: daily at 2:30 AM Pacific, with the person's
+ *                Robinhood sign-in (earnings.ts)
+ *   earnings     Check earnings reports: every 2 min inside the report windows (3:00 to 6:30 AM and
+ *                1:00 to 2:30 PM Pacific, NYSE days), only for symbols reporting that day
  *
  * One sealed document per person in D1 `schedules` (migration 0031); its plain `next_at` is when the
  * earliest one is due, so the Worker's every-minute cron reads only the people with work
@@ -19,10 +26,19 @@ import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
 import { isTradingDay, nyParts } from '../../market-hours';
 import { type Vault, withRetry } from '../../vault';
+import { inReportWindow } from './earnings';
 import type { Logs } from './logs';
 import { portfolioOwner } from './portfolio';
 
-export const SCHEDULE_IDS = ['x_market', 'x_outside', 'posts_prune'] as const;
+export const SCHEDULE_IDS = [
+  'x_market',
+  'x_outside',
+  'news_market',
+  'news_outside',
+  'posts_prune',
+  'earnings_calendar',
+  'earnings',
+] as const;
 export type ScheduleId = (typeof SCHEDULE_IDS)[number];
 
 export interface ScheduleRun {
@@ -50,6 +66,16 @@ interface Doc {
   schedules: Schedule[];
   /** False while X is not connected: the X checks don't run. */
   x: boolean;
+  /** False while Alpaca is not connected: Check news doesn't run. */
+  news?: boolean;
+  /** False while Robinhood is not connected: the earnings schedules don't run. */
+  earnings?: boolean;
+}
+/** Which outside services are connected, so their schedules can run. */
+export interface Ready {
+  x: boolean;
+  news: boolean;
+  earnings: boolean;
 }
 
 const PACIFIC = 'America/Los_Angeles';
@@ -74,6 +100,26 @@ const DEFAULTS: Record<ScheduleId, Schedule> = {
     tz: PACIFIC,
     last: null,
   },
+  news_market: {
+    id: 'news_market',
+    on: true,
+    every: 2,
+    from: '06:30',
+    to: '13:00',
+    days: [1, 2, 3, 4, 5],
+    tz: PACIFIC,
+    last: null,
+  },
+  news_outside: {
+    id: 'news_outside',
+    on: true,
+    every: 240,
+    from: '',
+    to: '',
+    days: [],
+    tz: PACIFIC,
+    last: null,
+  },
   posts_prune: {
     id: 'posts_prune',
     on: true,
@@ -84,13 +130,43 @@ const DEFAULTS: Record<ScheduleId, Schedule> = {
     tz: PACIFIC,
     last: null,
   },
+  earnings_calendar: {
+    id: 'earnings_calendar',
+    on: true,
+    every: 1440,
+    from: '02:30',
+    to: '',
+    days: [0, 1, 2, 3, 4, 5, 6],
+    tz: PACIFIC,
+    last: null,
+  },
+  earnings: {
+    id: 'earnings',
+    on: true,
+    every: 2,
+    from: '',
+    to: '',
+    days: [1, 2, 3, 4, 5],
+    tz: PACIFIC,
+    last: null,
+  },
 };
 export const SCHEDULE_NAMES: Record<ScheduleId, string> = {
   x_market: 'Check X · market hours',
   x_outside: 'Check X · outside market hours',
+  news_market: 'Check news · market hours',
+  news_outside: 'Check news · outside market hours',
   posts_prune: 'Prune old posts',
+  earnings_calendar: 'Refresh earnings calendar',
+  earnings: 'Check earnings reports',
 };
+const DAILY: ScheduleId[] = ['posts_prune', 'earnings_calendar'];
 const MIN = 60_000;
+const readyOf = (doc: Doc): Ready => ({
+  x: doc.x,
+  news: doc.news ?? false,
+  earnings: doc.earnings ?? false,
+});
 /** How far ahead a next run is looked for. */
 const HORIZON = 8 * 1440;
 /** People whose schedules one cron tick runs. */
@@ -130,19 +206,31 @@ function inMarketWindow(s: Schedule, t: number) {
 }
 
 /** When `s` next runs (ms), or null when it is off or can't run. */
-export function nextRun(s: Schedule, all: Schedule[], now: number, xReady = true): number | null {
-  if (!s.on || ((s.id === 'x_market' || s.id === 'x_outside') && !xReady)) return null;
+export function nextRun(
+  s: Schedule,
+  all: Schedule[],
+  now: number,
+  ready: Ready = { x: true, news: true, earnings: true },
+): number | null {
+  if (!s.on) return null;
+  if ((s.id === 'x_market' || s.id === 'x_outside') && !ready.x) return null;
+  if ((s.id === 'news_market' || s.id === 'news_outside') && !ready.news) return null;
+  if ((s.id === 'earnings_calendar' || s.id === 'earnings') && !ready.earnings) return null;
   const last = s.last ? Date.parse(s.last.at) : null;
   // A daily run waits at least an hour after the last, so it never runs twice in one minute.
-  const gap = s.id === 'posts_prune' ? 60 : s.every;
+  const gap = DAILY.includes(s.id) ? 60 : s.every;
   let t = Math.ceil(Math.max(now, last === null ? now : last + gap * MIN) / MIN) * MIN;
-  const market = all.find((x) => x.id === 'x_market') ?? DEFAULTS.x_market;
+  const window = (id: 'x_market' | 'news_market') => all.find((x) => x.id === id) ?? DEFAULTS[id];
   const ok = (at: number) =>
-    s.id === 'x_market'
+    s.id === 'x_market' || s.id === 'news_market'
       ? inMarketWindow(s, at)
       : s.id === 'x_outside'
-        ? !inMarketWindow(market, at)
-        : local(at, s.tz).minutes === minutesOf(s.from);
+        ? !inMarketWindow(window('x_market'), at)
+        : s.id === 'news_outside'
+          ? !inMarketWindow(window('news_market'), at)
+          : s.id === 'earnings'
+            ? isTradingDay(nyParts(at)) && inReportWindow(at)
+            : local(at, s.tz).minutes === minutesOf(s.from);
   for (let i = 0; i < HORIZON; i++, t += MIN) if (ok(t)) return t;
   return null;
 }
@@ -181,6 +269,8 @@ export class Schedules {
     private readonly vault: Vault,
     private readonly jobs: ScheduleJobs,
     private readonly logs?: Logs,
+    /** Which outside services the person has connected, read live; corrects the stored flags. */
+    private readonly connected?: (owner: string) => Promise<Ready>,
   ) {}
 
   private async load(owner: string) {
@@ -192,6 +282,8 @@ export class Schedules {
     const stored = row ? await v.open<Doc>(`schedules:${v.owner}`, row.data) : null;
     const doc: Doc = {
       x: stored?.x ?? false,
+      news: stored?.news ?? false,
+      earnings: stored?.earnings ?? false,
       schedules: SCHEDULE_IDS.map((id) => ({
         ...DEFAULTS[id],
         ...(stored?.schedules.find((s) => s.id === id) ?? {}),
@@ -205,7 +297,7 @@ export class Schedules {
     const v = await this.vault.for(owner);
     const now = Date.now();
     const times = doc.schedules
-      .map((s) => nextRun(s, doc.schedules, now, doc.x))
+      .map((s) => nextRun(s, doc.schedules, now, readyOf(doc)))
       .filter((t): t is number => t !== null);
     const next = times.length ? Math.min(...times) : null;
     const data = await v.seal(`schedules:${v.owner}`, doc);
@@ -235,15 +327,35 @@ export class Schedules {
 
   /** The person's schedules with their names and next runs. */
   async list(owner: string) {
-    const { doc } = await this.load(owner);
+    let { doc } = await this.load(owner);
+    // A service connected before its schedule existed (or the flag missed a change): set it right.
+    const live = await this.connected?.(owner);
+    if (
+      live &&
+      (live.x !== doc.x ||
+        live.news !== (doc.news ?? false) ||
+        live.earnings !== (doc.earnings ?? false))
+    )
+      doc = await this.change(owner, (d) => ({ ...d, ...live }));
     const now = Date.now();
     return doc.schedules.map((s) => {
-      const next = nextRun(s, doc.schedules, now, doc.x);
+      const next = nextRun(s, doc.schedules, now, readyOf(doc));
       return {
         ...s,
         name: SCHEDULE_NAMES[s.id],
         next: next === null ? null : new Date(next).toISOString(),
-        waiting: !doc.x && s.id !== 'posts_prune' ? 'X is not connected' : null,
+        waiting:
+          s.id === 'news_market' || s.id === 'news_outside'
+            ? doc.news
+              ? null
+              : 'Alpaca is not connected'
+            : s.id === 'earnings_calendar' || s.id === 'earnings'
+              ? doc.earnings
+                ? null
+                : 'Robinhood is not connected'
+              : !doc.x && s.id !== 'posts_prune'
+                ? 'X is not connected'
+                : null,
       };
     });
   }
@@ -253,7 +365,7 @@ export class Schedules {
       change.from &&
       change.to &&
       minutesOf(change.from) >= minutesOf(change.to) &&
-      id === 'x_market'
+      (id === 'x_market' || id === 'news_market')
     )
       throw new ScheduleInvalid('The window must end after it starts.');
     await this.change(owner, (doc) => ({
@@ -266,6 +378,16 @@ export class Schedules {
   /** X was connected or disconnected (integrations.ts): the X checks start or stop. */
   async setX(owner: string, connected: boolean) {
     await this.change(owner, (doc) => ({ ...doc, x: connected }));
+  }
+
+  /** Alpaca was connected, tested or disconnected (integrations.ts): Check news starts or stops. */
+  async setNews(owner: string, connected: boolean) {
+    await this.change(owner, (doc) => ({ ...doc, news: connected }));
+  }
+
+  /** Robinhood was connected, tested or disconnected (integrations.ts): the earnings schedules start or stop. */
+  async setEarnings(owner: string, connected: boolean) {
+    await this.change(owner, (doc) => ({ ...doc, earnings: connected }));
   }
 
   /** Runs one schedule now, for the person (Run now); its regular times stay as they are. */
@@ -287,7 +409,7 @@ export class Schedules {
     } catch (err) {
       run = { at, ok: false, detail: ((err as Error).message ?? String(err)).slice(0, 300) };
     }
-    // X checks log themselves (category X, with their calls); the prune is logged here.
+    // X, news and earnings log themselves (categories X, News, Earnings); the prune is logged here.
     if (id === 'posts_prune')
       await this.logs?.note(owner, {
         category: 'schedules',
@@ -318,7 +440,7 @@ export class Schedules {
   private async runOwner(owner: string, now: number) {
     const { doc, version } = await this.load(owner);
     const due = doc.schedules.filter((s) => {
-      const t = nextRun(s, doc.schedules, now - MIN + 1, doc.x);
+      const t = nextRun(s, doc.schedules, now - MIN + 1, readyOf(doc));
       return t !== null && t <= now;
     });
     if (!due.length) {
@@ -335,9 +457,9 @@ export class Schedules {
     if (!(await this.store(owner, claimed, version))) return; // another cron took it
     for (const s of due) {
       const why =
-        s.id === 'x_market'
+        s.id === 'x_market' || s.id === 'news_market'
           ? 'market hours'
-          : s.id === 'x_outside'
+          : s.id === 'x_outside' || s.id === 'news_outside'
             ? 'outside market hours'
             : 'schedule';
       const run = await this.run(owner, s.id, why);

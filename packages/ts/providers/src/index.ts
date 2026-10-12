@@ -5,4 +5,4 @@
 export * from './types';
 export * from './occ';
 export { AlpacaClient, envAlpacaConfig, normalizeOptionSnapshot } from './alpaca';
-export type { AlpacaConfig } from './alpaca';
+export type { AlpacaConfig, NewsArticle } from './alpaca';

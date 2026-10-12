@@ -418,11 +418,13 @@ export const SERVER_INSTRUCTIONS =
   '(you pay twitterapi.io) and the X accounts to track; post_list then reads their posts, tagged ' +
   'with symbols, a macro theme and sentiment, e.g. post_list {symbol: "NVDA", hours: 48}. ' +
   "An account's cash is signed: negative is margin borrowed, e.g. cash: -12500. " +
-  'Tag holdings two ways. A sector belongs to a ticker, shared by every account and option on it: ' +
-  'sector_write {sectors: {"TQQQ": "Technology"}}. A basket belongs to a holding, e.g. the positions ' +
-  'one strategy holds: basket_write {basket: "9-sig", symbols: ["TQQQ", "GLDM"]} (add portfolio_id ' +
-  'for one account only). portfolio_read shows both on each position. People edit the same Sector ' +
-  'and Basket cells in the app. ' +
+  'A sector belongs to a ticker, shared by every account and option on it: ' +
+  'sector_write {sectors: {"TQQQ": "Technology"}}. Autopilot baskets: a basket has target weights, ' +
+  'a rebalance rule and a mode, and holds one sleeve (shares + its own cash) per account; ' +
+  'basket_list shows them with drift and what is Unassigned, basket_write creates or changes one ' +
+  '(its sleeves too), basket_move moves cash, basket_rebalance proposes orders, and order_list / ' +
+  'order_write work the queue (the person approves; nothing is sent to a broker yet). ' +
+  "portfolio_read shows each position's sector and basket. " +
   'Views: custom_view_* saves how a holdings or transactions page looks, the same settings ' +
   "as the app's Edit view dialog: shape (table, group or pivot), columns, chips (a text field as a " +
   'badge in its own column, or inline on the Symbol), the group and filters it opens with, formula ' +

@@ -169,9 +169,9 @@ export const watchlistQuery = () =>
     staleTime: 60_000,
   });
 /**
- * Sector (per ticker, every account and every option on it) and Basket (per holding; no account
- * means every account) on holdings (Bikram, 2026-10-09). Agents set them via MCP sector_write and
- * basket_write.
+ * Sector (per ticker, every account and every option on it) on holdings (Bikram, 2026-10-09), and
+ * which Autopilot basket's sleeve holds each holding. Agents set them via MCP sector_write and
+ * basket_*.
  */
 export interface TagSet {
   sectors: Record<string, string>;
@@ -186,12 +186,173 @@ export const tagsQuery = () =>
 /** Ticker → sector; null clears it. */
 export const writeSectors = (sectors: Record<string, string | null>) =>
   send<TagSet>('POST', '/api/v1/tags/sectors', { sectors });
-/** Puts symbols in a basket (null takes them out); no portfolio_id means every account. */
-export const writeBasket = (w: {
-  basket: string | null;
-  symbols: string[];
-  portfolio_id?: string;
-}) => send<TagSet>('POST', '/api/v1/tags/baskets', w);
+/** Moves one holding (every share the account holds) into a basket's sleeve; a new name makes the
+ *  basket (Mode off), null puts it back in Unassigned. */
+export const assignBasket = (w: { basket: string | null; symbol: string; portfolio_id: string }) =>
+  send<{ ok: true }>('POST', '/api/v1/baskets/assign', w);
+
+// ── Autopilot (Bikram, 2026-10-12): baskets with one sleeve per account, and their orders ──
+
+export type Rebalance = 'monthly' | 'quarterly' | 'yearly';
+export type BasketMode = 'off' | 'suggest';
+export type OrderStatus =
+  | 'proposed'
+  | 'approved'
+  | 'sent'
+  | 'filled'
+  | 'rejected'
+  | 'cancelled'
+  | 'by_hand';
+export type OrderAction = 'approve' | 'reject' | 'undo' | 'placed' | 'cancel';
+export interface AutopilotAccount {
+  id: string;
+  name: string;
+  tax_type: 'taxable' | 'retirement';
+  via: 'snaptrade' | 'robinhood' | null;
+  trade: boolean;
+  tradeable: boolean;
+}
+export interface BasketRow {
+  symbol: string;
+  shares: number;
+  value: number;
+  target: number;
+  now: number;
+  drift: number;
+  accounts: string[];
+}
+export interface Sleeve {
+  portfolio_id: string;
+  account: string;
+  tax_type: 'taxable' | 'retirement';
+  tradeable: boolean;
+  via: AutopilotAccount['via'];
+  shares: Record<string, number>;
+  cash: number;
+  value: number;
+}
+export interface Basket {
+  id: string;
+  name: string;
+  targets: Record<string, number>;
+  rebalance: Rebalance;
+  drift: number;
+  mode: BasketMode;
+  created_at: string;
+  updated_at: string;
+  value: number;
+  cash: number;
+  cash_now: number;
+  rows: BasketRow[];
+  max_drift: number;
+  worst_drift: number;
+  due: 'calendar' | 'drift' | null;
+  next_rebalance: string;
+  sleeves: Sleeve[];
+  open_orders: number;
+  can_auto: boolean;
+}
+export interface Unassigned {
+  portfolio_id: string;
+  account: string;
+  cash: number;
+  holdings: { symbol: string; shares: number; value: number }[];
+  value: number;
+}
+export interface AutopilotOverview {
+  baskets: Basket[];
+  unassigned: Unassigned[];
+  accounts: AutopilotAccount[];
+  next_window: string;
+  unpriced: string[];
+  queue: number;
+  to_place: number;
+}
+export interface Order {
+  id: string;
+  basket_id: string;
+  basket: string;
+  portfolio_id: string;
+  account: string;
+  side: 'buy' | 'sell';
+  symbol: string;
+  qty: number;
+  price: number;
+  status: OrderStatus;
+  via: AutopilotAccount['via'];
+  send_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface PlannedOrder {
+  portfolio_id: string;
+  account: string;
+  side: 'buy' | 'sell';
+  symbol: string;
+  qty: number;
+  price: number;
+  by_hand: boolean;
+}
+export interface BasketInput {
+  name?: string;
+  targets?: Record<string, number>;
+  rebalance?: Rebalance;
+  drift?: number;
+  mode?: BasketMode;
+  sleeves?: { portfolio_id: string; shares: Record<string, number>; cash: number }[];
+}
+
+export const autopilotQuery = () =>
+  queryOptions({
+    queryKey: ['autopilot'],
+    queryFn: () => getJson<AutopilotOverview>('/api/v1/baskets'),
+    staleTime: 30_000,
+  });
+export const ordersQuery = () =>
+  queryOptions({
+    queryKey: ['autopilot', 'orders'],
+    queryFn: () => getJson<Order[]>('/api/v1/orders'),
+    staleTime: 30_000,
+  });
+export const basketPreviewQuery = (id: string, enabled = true) =>
+  queryOptions({
+    queryKey: ['autopilot', 'preview', id],
+    queryFn: () => getJson<PlannedOrder[]>(`/api/v1/baskets/${id}/preview`),
+    enabled,
+  });
+/** The buys Move cash would propose in one account after moving `cash` in. */
+export const movePreviewQuery = (id: string, portfolio_id: string, cash: number, enabled = true) =>
+  queryOptions({
+    queryKey: ['autopilot', 'preview', id, portfolio_id, cash],
+    queryFn: () =>
+      getJson<PlannedOrder[]>(
+        `/api/v1/baskets/${id}/preview?portfolio_id=${encodeURIComponent(portfolio_id)}&cash=${cash}`,
+      ),
+    enabled,
+    placeholderData: keepPreviousData,
+  });
+/** The trades a basket being set up would start with; saves nothing. */
+export const draftBasket = (d: {
+  targets: Record<string, number>;
+  sleeves: NonNullable<BasketInput['sleeves']>;
+}) => send<PlannedOrder[]>('POST', '/api/v1/baskets/draft', d);
+export const createBasket = (b: BasketInput & { name: string }) =>
+  send<Basket>('POST', '/api/v1/baskets', b);
+export const updateBasket = (id: string, b: BasketInput) =>
+  send<Basket>('PUT', `/api/v1/baskets/${id}`, b);
+export const deleteBasket = (id: string) => send<{ ok: true }>('DELETE', `/api/v1/baskets/${id}`);
+export const rebalanceBasket = (id: string) =>
+  send<Order[]>('POST', `/api/v1/baskets/${id}/rebalance`, {});
+export const moveCash = (m: {
+  portfolio_id: string;
+  from: string | null;
+  to: string | null;
+  amount: number;
+  propose: boolean;
+}) => send<AutopilotOverview>('POST', '/api/v1/baskets/move', m);
+export const actOnOrders = (ids: string[], action: OrderAction) =>
+  send<Order[]>('POST', '/api/v1/orders', { ids, action });
+
 export const addToWatchlist = (symbols: string[]) =>
   send<WatchItem[]>('POST', '/api/v1/watchlist', { symbols });
 export const removeFromWatchlist = (symbol: string) =>
@@ -296,6 +457,54 @@ export interface Transaction {
   description?: string | null;
 }
 
+export const PERFORMANCE_WINDOWS = ['1M', '3M', 'YTD', '1Y', '3Y', '5Y', 'All'] as const;
+export type PerformanceWindowKey = (typeof PERFORMANCE_WINDOWS)[number];
+/** Portfolio ▸ Performance: worked out on each read from your transactions and daily closes. */
+export interface Performance {
+  as_of: string | null;
+  source: 'built-in' | 'dataedge';
+  compare: string[];
+  points: {
+    date: string;
+    value: number;
+    money_in: number;
+    /** Time-weighted growth of $1 from the first point. */
+    growth: number;
+    /** Each compared symbol's total-return close. */
+    compare: Record<string, number | null>;
+  }[];
+  windows: {
+    key: PerformanceWindowKey;
+    from: string;
+    value: number;
+    money_in: number;
+    gain: number;
+    return: number;
+    compare: Record<string, { return: number | null; same_flows: number | null }>;
+  }[];
+  starts: { account_id: string; name: string; broker: string | null; date: string }[];
+  unpriced: { symbol: string; account: string; share: number }[];
+  key_dates: Record<'fomc' | 'cpi' | 'jobs', string[]> | null;
+}
+/** Every account, without positions (Performance's filter). */
+export const portfoliosQuery = () =>
+  queryOptions({
+    queryKey: ['portfolios', 'list'],
+    queryFn: () => getJson<PortfolioSummary[]>('/api/v1/portfolios'),
+    staleTime: 60_000,
+  });
+export const performanceQuery = (accounts: string[] | null, compare: string[]) =>
+  queryOptions({
+    queryKey: ['performance', accounts, compare],
+    queryFn: () =>
+      getJson<Performance>(
+        `/api/v1/portfolios/performance?compare=${enc(compare.join(','))}${accounts ? `&accounts=${enc(accounts.join(','))}` : ''}`,
+      ),
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData,
+    retry: (n, err) => !(err instanceof ApiError && err.status === 409) && n < 2,
+  });
+
 /** Every account in full (positions, lots, realized, checks) in one request: Holdings. */
 export const holdingsAccountsQuery = () =>
   queryOptions({
@@ -396,7 +605,15 @@ export const deletePortfolioView = (domain: PortfolioDomain, id: string) =>
 
 // ── Logs (Bikram, 2026-10-11): the person's own activity, newest first ──
 
-export type LogCategory = 'snaptrade' | 'mcp' | 'user' | 'backend' | 'x' | 'schedules';
+export type LogCategory =
+  | 'snaptrade'
+  | 'mcp'
+  | 'user'
+  | 'backend'
+  | 'x'
+  | 'news'
+  | 'earnings'
+  | 'schedules';
 export interface LogEntry {
   id: string;
   at: string;
@@ -557,11 +774,38 @@ export type SnapTradeStatus =
       /** SnapTrade could not be reached. */
       error: string | null;
     };
+/** Where Performance reads daily closes: built in (the suite), else the person's DataEdge key. */
+export type DataEdgeStatus =
+  | { built_in: true; connected: true }
+  | { built_in: false; connected: false }
+  | {
+      built_in: false;
+      connected: true;
+      url: string;
+      client_id: string;
+      saved_at: string;
+      last_test: KeyTest | null;
+    };
+/** A check for new posts or news: when, whether it worked and how many it stored. */
+export interface PostCheck {
+  at: string;
+  ok: boolean;
+  posts: number;
+  error: string | null;
+}
 export interface IntegrationsStatus {
+  dataedge: DataEdgeStatus;
   snaptrade: SnapTradeStatus;
   alpaca:
     | { connected: false }
-    | { connected: true; key_id: string; saved_at: string; last_test: KeyTest | null };
+    | {
+        connected: true;
+        key_id: string;
+        saved_at: string;
+        last_test: KeyTest | null;
+        /** The last news check (Check news). */
+        last_news: PostCheck | null;
+      };
   robinhood: RobinhoodStatus;
   x: XStatus;
   ntfy: NtfyStatus;
@@ -585,13 +829,15 @@ export type XStatus =
       saved_at: string;
       credit: XCredit | null;
       last_test: KeyTest | null;
-      last_check: { at: string; ok: boolean; posts: number; error: string | null } | null;
+      last_check: PostCheck | null;
     };
 /** A webhook target (Bikram, 2026-10-12); `url` is masked. */
 export interface WebhookTarget {
   id: string;
   name: string;
   url: string;
+  /** Headers sent with each post; values masked. */
+  headers: { name: string; value: string }[];
   created_at: string;
   last_test: KeyTest | null;
 }
@@ -671,6 +917,12 @@ export const setAccountTrade = (id: string, trade: boolean) =>
   send<IntegrationsStatus>('PUT', `/api/v1/integrations/snaptrade/accounts/${enc(id)}/trade`, {
     trade,
   });
+export const saveDataEdgeKey = (key: { url: string; client_id: string; client_secret: string }) =>
+  send<IntegrationsStatus>('PUT', '/api/v1/integrations/dataedge', key);
+export const testDataEdge = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/dataedge/test', {});
+export const deleteDataEdgeKey = () =>
+  send<{ ok: true }>('DELETE', '/api/v1/integrations/dataedge');
 export const saveAlpacaKey = (key: { key_id: string; secret_key: string }) =>
   send<IntegrationsStatus>('PUT', '/api/v1/integrations/alpaca', key);
 export const testAlpaca = () =>
@@ -693,6 +945,10 @@ export const deleteX = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/
 
 // ── Posts (Bikram, 2026-10-12): what the tracked X accounts post, tagged ──
 
+/** Where a post came from: a tracked X account, or Alpaca's news (Benzinga). */
+export const POST_SOURCES = { x: 'X', alpaca: 'Alpaca', sec: 'SEC' } as const;
+export type PostSource = keyof typeof POST_SOURCES;
+
 export const THEMES = {
   fed_rates: 'Fed and rates',
   inflation: 'Inflation',
@@ -707,8 +963,10 @@ export const THEMES = {
 export type Theme = keyof typeof THEMES;
 export interface Post {
   id: string;
+  source: PostSource;
   url: string;
   at: string;
+  /** The X account (no @), or the news publisher (`benzinga`). */
   handle: string;
   name: string;
   text: string;
@@ -718,6 +976,8 @@ export interface Post {
   /** −1 very bearish … +1 very bullish. */
   sentiment: number | null;
   sentiment_conf: number | null;
+  /** Later posts of the same news, folded into this one, oldest first. */
+  repeats?: Post[];
 }
 export interface PostsPage {
   /** `d1`: kept 30 days; `dataedge`: kept for good. */
@@ -733,8 +993,11 @@ export const postsQuery = () =>
     staleTime: 60_000,
     refetchInterval: 120_000,
   });
-/** Feed and Macro read one row per post (`posts`), By symbol one per post and symbol (`post_symbols`). */
-export const POST_DOMAINS = ['posts', 'post_symbols'] as const;
+/**
+ * Feed and Macro read one row per post (`posts`), By symbol one per post and symbol
+ * (`post_symbols`), Earnings one per symbol's next report (`earnings`).
+ */
+export const POST_DOMAINS = ['posts', 'post_symbols', 'earnings'] as const;
 export type PostDomain = (typeof POST_DOMAINS)[number];
 export type PostView = CustomView & { domain: PostDomain };
 /** Both domains' views: the app views first (Feed, By symbol, Macro), then the person's own. */
@@ -750,7 +1013,7 @@ export const postViewsQuery = () =>
         ),
       );
       const all = lists.flat();
-      const order = ['feed', 'by-symbol', 'macro'];
+      const order = ['feed', 'by-symbol', 'macro', 'earnings'];
       return [
         ...all.filter((v) => v.app).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
         ...all.filter((v) => !v.app),
@@ -771,13 +1034,40 @@ export const savePostView = (
   });
 export const deletePostView = (domain: PostDomain, id: string) =>
   send<{ deleted: string }>('DELETE', `/api/v1/custom-views/${domain}/${enc(id)}`);
+/** One symbol's next report and its last 8-K one-liner (Robinhood calendar + SEC). */
+export interface EarningsRow {
+  symbol: string;
+  date: string;
+  verified: boolean;
+  timing: string | null;
+  eps_estimate: number | null;
+  last: { date: string; line: string; url: string; at: string } | null;
+}
+export interface EarningsPage {
+  connected: boolean;
+  refreshed_at: string | null;
+  rows: EarningsRow[];
+}
+export const earningsQuery = () =>
+  queryOptions({
+    queryKey: ['earnings'],
+    queryFn: () => getJson<EarningsPage>('/api/v1/earnings'),
+    staleTime: 60_000,
+  });
 /** App views open at `/posts/<id>`, a person's own at `/posts/views/<domain>/<id>`. */
 export const postViewPath = (v: { app?: boolean; id: string; domain: PostDomain }) =>
   v.app ? `/posts/${v.id}` : `/posts/views/${v.domain}/${v.id}`;
 
 // ── Schedules (Bikram, 2026-10-12): work TradeEdge runs on its own, changeable by the person ──
 
-export type ScheduleId = 'x_market' | 'x_outside' | 'posts_prune';
+export type ScheduleId =
+  | 'x_market'
+  | 'x_outside'
+  | 'news_market'
+  | 'news_outside'
+  | 'posts_prune'
+  | 'earnings_calendar'
+  | 'earnings';
 export interface Schedule {
   id: ScheduleId;
   name: string;
@@ -816,8 +1106,11 @@ export const createEmail = () => send<IntegrationsStatus>('POST', '/api/v1/integ
 export const testEmail = () =>
   send<IntegrationsStatus>('POST', '/api/v1/integrations/email/test', {});
 export const deleteEmail = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/email');
-export const addWebhook = (hook: { name: string; url: string }) =>
-  send<IntegrationsStatus>('POST', '/api/v1/integrations/webhooks', hook);
+export const addWebhook = (hook: {
+  name: string;
+  url: string;
+  headers?: { name: string; value: string }[];
+}) => send<IntegrationsStatus>('POST', '/api/v1/integrations/webhooks', hook);
 export const testWebhook = (id: string) =>
   send<IntegrationsStatus>('POST', `/api/v1/integrations/webhooks/${enc(id)}/test`, {});
 export const deleteWebhook = (id: string) =>

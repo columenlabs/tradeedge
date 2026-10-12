@@ -28,8 +28,11 @@ import {
   type TaxLot,
   type Transaction,
   allTransactionsQuery,
+  assignBasket,
+  autopilotQuery,
   dataedgeSymbolsQuery,
   deletePortfolioView,
+  getJson,
   holdingsAccountsQuery,
   portfolioViewPath,
   portfolioViewsQuery,
@@ -38,7 +41,6 @@ import {
   tagsQuery,
   transactionsQuery,
   watchlistQuery,
-  writeBasket,
   writeLotCost,
   writeSectors,
 } from '@/lib/api';
@@ -541,6 +543,28 @@ const HOLDINGS_BASE: ViewDomain<Holding> = {
   ],
   merge: { key: (h) => h.symbol, rows: consolidate },
   parts: { label: 'Holdings', by: 'account', rows: (h) => h.parts },
+  // One level only (Bikram, 2026-10-12): a combined row opens its accounts, a one-account row
+  // its open tax lots.
+  expand: (h) => {
+    if (h.parts.length > 1) return { label: 'accounts', rows: h.parts };
+    const lots = h.account.lots.filter((l) => l.symbol === h.symbol);
+    const term = (key: string) => {
+      const l = lots[Number(key.split(':lot:')[1])];
+      return l ? `${l.acquired}${l.term ? ` · ${l.term === 'long' ? 'Long' : 'Short'}` : ''}` : '';
+    };
+    return {
+      label: 'tax lots',
+      name: (lot) => term(lot.key),
+      rows: lots.map((l, i) => ({
+        ...h,
+        key: `${h.key}:lot:${i}`,
+        quantity: l.quantity,
+        avg_cost: l.cost,
+        checks: [],
+        parts: [],
+      })),
+    };
+  },
 };
 
 /** A holding's sector (by underlying) and basket (its account's own, else every account's). */
@@ -556,7 +580,7 @@ function tagsOf(set: TagSet | undefined, p: { symbol: string; underlying: string
  */
 function holdingsDomain(
   saved: (set: TagSet) => void,
-  known: () => { rows: Holding[]; set: TagSet | undefined },
+  known: () => { rows: Holding[]; set: TagSet | undefined; baskets: string[] },
   facts: Record<string, SymbolFacts>,
   trading: Map<string, string>,
 ): ViewDomain<Holding> {
@@ -599,20 +623,19 @@ function holdingsDomain(
       icon: Tag,
       value: (h) => h.basket,
       format: 'text',
-      formula: 'per holding: one account, or every account',
+      formula: 'per holding: the Autopilot basket whose sleeve holds it',
       filterable: true,
       groupable: true,
       edit: {
         save: async (h, v) => {
           const parts = h.parts.length ? h.parts : [h];
-          let set: TagSet | undefined;
           for (const p of parts)
-            set = await writeBasket({ basket: v, symbols: [h.symbol], portfolio_id: p.account.id });
-          if (set) saved(set);
+            await assignBasket({ basket: v, symbol: h.symbol, portfolio_id: p.account.id });
+          saved(await getJson<TagSet>('/api/v1/tags'));
         },
         options: choices(
           (h) => h.basket,
-          (set) => (set?.baskets ?? []).map((b) => b.basket),
+          (set) => [...(set?.baskets ?? []).map((b) => b.basket), ...known().baskets],
         ),
         note: (h) =>
           h.parts.length > 1
@@ -1763,8 +1786,10 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
   );
   // Every holding and tag, unfiltered, for the Sector and Basket pickers.
   const tags = qc.getQueryData(tagsQuery().queryKey);
-  const known = useRef({ rows, set: tags });
-  known.current = { rows, set: tags };
+  // Every Autopilot basket, empty ones included, for the Basket picker.
+  const baskets = (qc.getQueryData(autopilotQuery().queryKey)?.baskets ?? []).map((b) => b.name);
+  const known = useRef({ rows, set: tags, baskets });
+  known.current = { rows, set: tags, baskets };
   const activity = useActivity(accounts, view.domain === 'transactions');
   const lots = useMemo<LotRow[]>(
     () => (view.domain === 'tax_lots' ? lotRows(accounts) : []),
@@ -1828,7 +1853,10 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
   const holdings = useMemo(
     () =>
       holdingsDomain(
-        (set) => qc.setQueryData(tagsQuery().queryKey, set),
+        (set) => {
+          qc.setQueryData(tagsQuery().queryKey, set);
+          void qc.invalidateQueries({ queryKey: autopilotQuery().queryKey });
+        },
         () => known.current,
         facts,
         trading,

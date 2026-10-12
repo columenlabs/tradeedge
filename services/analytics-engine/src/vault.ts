@@ -317,6 +317,28 @@ const SEALED_TABLES: {
     aad: (r: Record<string, string>) => ({ data: `${table}:${r.id}` }),
   })),
   {
+    table: 'basket_sleeves',
+    key: ['basket_id', 'portfolio_id'],
+    owner: 'portfolio',
+    sealed: ['data'],
+    aad: (r) => ({ data: `basket_sleeves:${r.basket_id}:${r.portfolio_id}` }),
+  },
+  {
+    table: 'baskets',
+    key: ['id'],
+    owner: 'own',
+    sealed: ['data'],
+    indexed: ['name_key'],
+    aad: (r) => ({ data: `baskets:${r.id}` }),
+  },
+  {
+    table: 'basket_orders',
+    key: ['id'],
+    owner: 'own',
+    sealed: ['data'],
+    aad: (r) => ({ data: `basket_orders:${r.id}` }),
+  },
+  {
     table: 'posts',
     key: ['id'],
     owner: 'own',

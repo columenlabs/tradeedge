@@ -239,3 +239,80 @@ export function symbolListQuery(database = DEFAULT_DATABASE): Query {
     params: {},
   };
 }
+
+/**
+ * Daily closes of `symbols` (tickers) from `from` to `to` (YYYY-MM-DD), unadjusted and total-return
+ * adjusted (`stock_bars_1d_raw`, `stock_bars_1d_adj`), plus the daily NAVs of funds the bars miss
+ * (`series_1d` `yahoo:<ticker>`, where `adj` is the NAV). A day missing its adjusted close has `adj` 0.
+ * TradeEdge's Performance page values holdings with `close` and compares growth with `adj`.
+ */
+export function dailyClosesQuery(
+  symbols: string[],
+  from: string,
+  to: string,
+  database = DEFAULT_DATABASE,
+): Query {
+  if (!IDENT_RE.test(database)) throw new Error(`invalid database: ${database}`);
+  const bars = (t: string) =>
+    [
+      `SELECT symbol, trading_date, close FROM ${database}.${t} FINAL`,
+      "WHERE symbol IN (SELECT arrayJoin(splitByChar(',', {symbols:String})))",
+      'AND trading_date BETWEEN {from:Date} AND {to:Date} AND close > 0',
+    ].join(' ');
+  return {
+    sql: [
+      'SELECT symbol, date, close, adj, nav FROM (',
+      'SELECT r.symbol AS symbol, toString(r.trading_date) AS date, r.close AS close, a.close AS adj, 0 AS nav',
+      `FROM (${bars('stock_bars_1d_raw')}) AS r`,
+      `LEFT JOIN (${bars('stock_bars_1d_adj')}) AS a`,
+      'ON r.symbol = a.symbol AND r.trading_date = a.trading_date',
+      'UNION ALL',
+      "SELECT replaceOne(series_id, 'yahoo:', '') AS symbol, toString(obs_date) AS date, value AS close, value AS adj, 1 AS nav",
+      `FROM ${database}.series_1d FINAL`,
+      "WHERE field = 'close' AND series_id IN",
+      "(SELECT arrayJoin(arrayMap(s -> concat('yahoo:', s), splitByChar(',', {symbols:String}))))",
+      'AND obs_date BETWEEN {from:Date} AND {to:Date} AND value > 0',
+      ') ORDER BY symbol, date',
+    ].join(' '),
+    params: { symbols: symbols.join(','), from, to },
+  };
+}
+
+/**
+ * End-of-day marks of option contracts (OCC symbols, under their `underlyings`) from `from` to `to`:
+ * the mid of bid and ask, else the last trade. `snapshot_date` is a UTC midnight, so its UTC date is
+ * the session's.
+ */
+export function optionMarksQuery(
+  contracts: string[],
+  underlyings: string[],
+  from: string,
+  to: string,
+  database = DEFAULT_DATABASE,
+): Query {
+  return {
+    sql: [
+      'SELECT symbol, toString(toDate(snapshot_date)) AS date,',
+      'if(bid > 0 AND ask > 0, (bid + ask) / 2, last) AS mark',
+      `FROM ${table(database)}`,
+      "WHERE underlying IN (SELECT arrayJoin(splitByChar(',', {underlyings:String})))",
+      "AND symbol IN (SELECT arrayJoin(splitByChar(',', {contracts:String})))",
+      'AND toDate(snapshot_date) BETWEEN {from:Date} AND {to:Date}',
+      'ORDER BY symbol, date',
+    ].join(' '),
+    params: { contracts: contracts.join(','), underlyings: underlyings.join(','), from, to },
+  };
+}
+
+/** FOMC, CPI and Jobs days (`series_1d` `cal:FOMC`, `cal:CPI`, `cal:NFP`) from `from` to `to`. */
+export function keyDatesQuery(from: string, to: string, database = DEFAULT_DATABASE): Query {
+  if (!IDENT_RE.test(database)) throw new Error(`invalid database: ${database}`);
+  return {
+    sql: [
+      `SELECT series_id, toString(obs_date) AS date FROM ${database}.series_1d FINAL`,
+      "WHERE series_id IN ('cal:FOMC', 'cal:CPI', 'cal:NFP') AND value = 1",
+      'AND obs_date BETWEEN {from:Date} AND {to:Date} ORDER BY obs_date',
+    ].join(' '),
+    params: { from, to },
+  };
+}

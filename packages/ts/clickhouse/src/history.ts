@@ -9,8 +9,11 @@ import {
   type ChainQueryParams,
   chainQuery,
   coverageQuery,
+  dailyClosesQuery,
   expirationsQuery,
   fundNavsQuery,
+  keyDatesQuery,
+  optionMarksQuery,
   rawClosesQuery,
   snapshotDatesQuery,
   symbolFactsQuery,
@@ -19,6 +22,21 @@ import {
 } from './queries';
 
 const n = (v: unknown): number => Number(v);
+
+/** One day of a symbol: its close as traded and its total-return close (dividends and splits in). */
+export interface DailyClose {
+  date: string;
+  close: number;
+  /** Null when the day has no adjusted close. A fund NAV's is the NAV. */
+  adj: number | null;
+}
+/** Closes by symbol, oldest first: tickers from the bars (or fund NAVs), OCC contracts their marks. */
+export type DailyCloses = Record<string, DailyClose[]>;
+/** FOMC, CPI and Jobs days. */
+export type KeyDates = Record<'fomc' | 'cpi' | 'jobs', string[]>;
+
+/** `SPY260918C00500000` → `SPY`; null for a ticker. */
+const occRoot = (s: string) => /^([A-Z0-9.]{1,6})\d{6}[CP]\d{8}$/.exec(s)?.[1] ?? null;
 const nOrNull = (v: unknown): number | null => {
   const x = Number(v);
   return v === null || v === undefined || !Number.isFinite(x) || x === 0 ? null : x;
@@ -140,6 +158,63 @@ export class HistoryStore {
       if (!asOf || r.date > asOf) asOf = r.date;
     }
     return { facts, asOf };
+  }
+
+  /**
+   * Daily closes from `from` to `to`: each ticker's bars (a fund the bars miss, its NAV), and each
+   * OCC contract's end-of-day mark (`close` and `adj` both the mark). One read per kind.
+   */
+  async dailyCloses(symbols: string[], from: string, to: string): Promise<DailyCloses> {
+    const contracts = symbols.filter((s) => occRoot(s));
+    const tickers = symbols.filter((s) => !occRoot(s));
+    const out: DailyCloses = {};
+    const [bars, marks] = await Promise.all([
+      tickers.length
+        ? this.ch.query<{
+            symbol: string;
+            date: string;
+            close: unknown;
+            adj: unknown;
+            nav: unknown;
+          }>(dailyClosesQuery(tickers, from, to, this.ch.database))
+        : [],
+      contracts.length
+        ? this.ch.query<{ symbol: string; date: string; mark: unknown }>(
+            optionMarksQuery(
+              contracts,
+              [...new Set(contracts.map((c) => occRoot(c) as string))],
+              from,
+              to,
+              this.ch.database,
+            ),
+          )
+        : [],
+    ]);
+    // A ticker with bars keeps them; its NAV rows count only when it has none.
+    const hasBars = new Set(bars.filter((r) => n(r.nav) === 0).map((r) => r.symbol));
+    for (const r of bars) {
+      if (n(r.nav) === 1 && hasBars.has(r.symbol)) continue;
+      const list = out[r.symbol] ?? [];
+      list.push({ date: r.date, close: n(r.close), adj: nOrNull(r.adj) });
+      out[r.symbol] = list;
+    }
+    for (const r of marks) {
+      const mark = nOrNull(r.mark);
+      if (mark === null) continue;
+      const list = out[r.symbol] ?? [];
+      list.push({ date: r.date, close: mark, adj: mark });
+      out[r.symbol] = list;
+    }
+    return out;
+  }
+
+  /** FOMC, CPI and Jobs days from `from` to `to`. */
+  async keyDates(from: string, to: string): Promise<KeyDates> {
+    const rows = await this.ch.query<{ series_id: string; date: string }>(
+      keyDatesQuery(from, to, this.ch.database),
+    );
+    const of = (id: string) => rows.filter((r) => r.series_id === id).map((r) => r.date);
+    return { fomc: of('cal:FOMC'), cpi: of('cal:CPI'), jobs: of('cal:NFP') };
   }
 
   /** DataEdge's symbol list. */

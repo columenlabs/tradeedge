@@ -53,7 +53,11 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const EVERY: Record<ScheduleId, number[]> = {
   x_market: [1, 2, 5, 15],
   x_outside: [60, 120, 240, 480],
+  news_market: [1, 2, 5, 15],
+  news_outside: [60, 120, 240, 480],
   posts_prune: [],
+  earnings_calendar: [],
+  earnings: [1, 2, 5],
 };
 const ZONES = [
   'America/Los_Angeles',
@@ -81,9 +85,13 @@ const zoneText = (tz: string) => tz.split('/').pop()?.replace('_', ' ') ?? tz;
 
 /** When it runs, in words. */
 function when(s: Schedule) {
-  if (s.id === 'x_market')
+  if (s.id === 'x_market' || s.id === 'news_market')
     return `${daysText(s.days)} ${clockText(s.from)}–${clockText(s.to)} ${zoneText(s.tz)}`;
-  if (s.id === 'x_outside') return 'All other times, and market holidays';
+  if (s.id === 'x_outside' || s.id === 'news_outside')
+    return 'All other times, and market holidays';
+  if (s.id === 'earnings') return 'On report days: 3:00–6:30 AM and 1:00–2:30 PM Pacific';
+  if (s.id === 'earnings_calendar')
+    return `Daily at ${clockText(s.from)} ${zoneText(s.tz)} · next 3 months`;
   return `Daily at ${clockText(s.from)} ${zoneText(s.tz)} · keeps 30 days`;
 }
 
@@ -198,7 +206,7 @@ function Editor({ s, onClose }: { s: Schedule; onClose: () => void }) {
             </ToggleGroup>
           </Row>
         ) : null}
-        {s.id === 'x_market' ? (
+        {s.id === 'x_market' || s.id === 'news_market' ? (
           <>
             <Row label="Window">
               <div className="flex items-center gap-2">
@@ -238,7 +246,7 @@ function Editor({ s, onClose }: { s: Schedule; onClose: () => void }) {
             </Row>
           </>
         ) : null}
-        {s.id === 'posts_prune' ? (
+        {s.id === 'posts_prune' || s.id === 'earnings_calendar' ? (
           <Row label="At">
             <Input
               type="time"
@@ -249,7 +257,12 @@ function Editor({ s, onClose }: { s: Schedule; onClose: () => void }) {
             />
           </Row>
         ) : null}
-        {s.id !== 'x_outside' ? (
+        {s.id === 'earnings' ? (
+          <p className="text-sm text-muted-foreground">
+            Runs only on a symbol's report day, in its window: before the open (am) or after the
+            close (pm), from the earnings calendar.
+          </p>
+        ) : s.id !== 'x_outside' && s.id !== 'news_outside' ? (
           <Row label="Time zone">
             <Select value={draft.tz} onValueChange={(tz) => set({ tz })}>
               <SelectTrigger className="w-full">
@@ -266,10 +279,26 @@ function Editor({ s, onClose }: { s: Schedule; onClose: () => void }) {
           </Row>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Runs whenever Check X · market hours is outside its window, including market holidays.
+            Runs whenever {s.id === 'news_outside' ? 'Check news' : 'Check X'} · market hours is
+            outside its window, including market holidays.
           </p>
         )}
-        {s.id !== 'posts_prune' ? (
+        {s.id === 'news_market' || s.id === 'news_outside' ? (
+          <p className="text-xs text-muted-foreground">
+            Each check reads Alpaca's news (Benzinga) with your own Alpaca key: one call, more when
+            many articles land.
+          </p>
+        ) : s.id === 'earnings_calendar' ? (
+          <p className="text-xs text-muted-foreground">
+            Reads the report date, am or pm, and EPS estimate of every symbol you hold or watch,
+            with your Robinhood sign-in.
+          </p>
+        ) : s.id === 'earnings' ? (
+          <p className="text-xs text-muted-foreground">
+            Reads the company's SEC filings (free) for an 8-K with its results; Workers AI pulls
+            EPS, revenue and guidance from the press release.
+          </p>
+        ) : s.id !== 'posts_prune' ? (
           <p className="text-xs text-muted-foreground">
             Each check costs twitterapi.io at least $0.00015, and posts $0.15 per 1,000. Market
             holidays count as outside hours.
@@ -399,7 +428,8 @@ export function SchedulesPage() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        X checks show in Logs under X, the prune under Schedules.
+        X checks show in Logs under X, news under News, earnings under Earnings and the prune under
+        Schedules.
       </p>
       <Sheet open={Boolean(editing)} onOpenChange={(o) => !o && setOpen(null)}>
         <SheetContent side={isMobile ? 'bottom' : 'right'} className="gap-4">

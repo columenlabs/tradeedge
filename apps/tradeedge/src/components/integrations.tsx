@@ -4,6 +4,7 @@
 // SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
 // Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
+  type DataEdgeStatus,
   type EmailStatus,
   type IntegrationsStatus,
   type KeyTest,
@@ -22,6 +23,7 @@ import {
   createEmail,
   createNtfy,
   deleteAlpacaKey,
+  deleteDataEdgeKey,
   deleteEmail,
   deleteNtfy,
   deletePortfolio,
@@ -33,6 +35,7 @@ import {
   holdingsAccountsQuery,
   integrationsQuery,
   saveAlpacaKey,
+  saveDataEdgeKey,
   saveNtfyToken,
   saveSnapTradeKey,
   saveX,
@@ -42,6 +45,7 @@ import {
   snaptradePortal,
   syncSnapTrade,
   testAlpaca,
+  testDataEdge,
   testEmail,
   testNtfy,
   testRobinhood,
@@ -1180,7 +1184,8 @@ function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
     >
       <p className="text-sm">
         Create a free market-data key at Alpaca, then paste it here. TradeEdge then uses it for live
-        quotes and option chains. Until then, live data uses EdgeDesk's key.
+        quotes and option chains, and reads the news into Posts (Check news, on Schedules). Until
+        then, live data uses EdgeDesk's key.
       </p>
       <Button size="sm" variant="outline" className="justify-self-start" asChild>
         <a href="https://app.alpaca.markets" target="_blank" rel="noreferrer">
@@ -1213,6 +1218,116 @@ function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
         size="sm"
         className="justify-self-end"
         disabled={!keyId.trim() || !secret.trim() || save.isPending}
+      >
+        {save.isPending ? <RefreshCwIcon className="animate-spin" /> : <CheckIcon />}
+        {save.isPending ? 'Checking…' : 'Save key'}
+      </Button>
+    </form>
+  );
+}
+
+// ── DataEdge (self-host, Bikram, 2026-10-12): daily closes for Portfolio ▸ Performance ──
+
+function DataEdge({ status }: { status: Exclude<DataEdgeStatus, { built_in: true }> }) {
+  const qc = useQueryClient();
+  const clock = useClock();
+  const [url, setUrl] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [secret, setSecret] = useState('');
+  const save = useMutation({
+    mutationFn: () =>
+      saveDataEdgeKey({
+        url: url.trim(),
+        client_id: clientId.trim(),
+        client_secret: secret.trim(),
+      }),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      setUrl('');
+      setClientId('');
+      setSecret('');
+      void qc.invalidateQueries({ queryKey: ['performance'] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: deleteDataEdgeKey,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['integrations'] });
+      void qc.invalidateQueries({ queryKey: ['performance'] });
+    },
+  });
+  if (status.connected)
+    return (
+      <div className="grid grid-cols-1 gap-3">
+        <KeyTestLine test={status.last_test} run={testDataEdge} />
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="num truncate">{status.url}</span>
+          <span className="num">{status.client_id}</span>
+          <span className="text-xs text-muted-foreground">saved {clock(status.saved_at)}</span>
+          <span className="flex-1" />
+          <ConfirmDelete
+            title="Disconnect DataEdge?"
+            description="Your key is deleted and Performance has no price history until you add one."
+            action="Disconnect"
+            onConfirm={() => remove.mutate()}
+          >
+            <Button size="sm" variant="destructive">
+              <Trash2Icon />
+              Disconnect
+            </Button>
+          </ConfirmDelete>
+          <ErrorLine error={remove.error} />
+        </div>
+      </div>
+    );
+  const ready = url.trim() && clientId.trim() && secret.trim();
+  return (
+    <form
+      className="grid grid-cols-1 gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (ready) save.mutate();
+      }}
+    >
+      <p className="text-sm">
+        Portfolio ▸ Performance values your holdings with DataEdge's daily closes. Paste DataEdge's
+        address and the read-only key (a service token) you were given.
+      </p>
+      <Field id="de-url" label="DataEdge address">
+        <Input
+          id="de-url"
+          className="num"
+          autoComplete="off"
+          placeholder="https://data.edgedesk.app"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </Field>
+      <Field id="de-id" label="Client ID">
+        <Input
+          id="de-id"
+          className="num"
+          autoComplete="off"
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+        />
+      </Field>
+      <Field id="de-secret" label="Client secret">
+        <Input
+          id="de-secret"
+          type="password"
+          className="num"
+          autoComplete="off"
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+        />
+      </Field>
+      <ErrorLine error={save.error} />
+      <Button
+        type="submit"
+        size="sm"
+        className="justify-self-end"
+        disabled={!ready || save.isPending}
       >
         {save.isPending ? <RefreshCwIcon className="animate-spin" /> : <CheckIcon />}
         {save.isPending ? 'Checking…' : 'Save key'}
@@ -1790,7 +1905,7 @@ function Email({ status }: { status: EmailStatus }) {
   return (
     <div className="grid grid-cols-1 gap-5">
       <Section title="Sends to">
-        <p className="text-sm">{status.address}, from hello@edgedesk.app</p>
+        <p className="text-sm">{status.address}, from notifications@edgedesk.app</p>
       </Section>
       <Section title="Test">
         <KeyTestLine test={status.last_test} run={testEmail} />
@@ -1841,6 +1956,11 @@ function WebhookRow({ hook }: { hook: WebhookTarget }) {
           </Button>
         </ConfirmDelete>
       </div>
+      {hook.headers.length ? (
+        <p className="num text-xs text-muted-foreground">
+          {hook.headers.map((h) => `${h.name}: ${h.value}`).join(' · ')}
+        </p>
+      ) : null}
       <KeyTestLine test={hook.last_test} run={() => testWebhook(hook.id)} />
       <ErrorLine error={remove.error} />
     </div>
@@ -1851,12 +1971,22 @@ function Webhooks({ hooks }: { hooks: WebhookTarget[] }) {
   const qc = useQueryClient();
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
+  const [headers, setHeaders] = useState<{ name: string; value: string }[]>([]);
+  const setHeader = (i: number, part: 'name' | 'value', v: string) =>
+    setHeaders((hs) => hs.map((h, j) => (j === i ? { ...h, [part]: v } : h)));
+  const filled = headers.filter((h) => h.name.trim() || h.value.trim());
   const add = useMutation({
-    mutationFn: () => addWebhook({ name: name.trim(), url: url.trim() }),
+    mutationFn: () =>
+      addWebhook({
+        name: name.trim(),
+        url: url.trim(),
+        headers: filled.map((h) => ({ name: h.name.trim(), value: h.value.trim() })),
+      }),
     onSuccess: (data) => {
       qc.setQueryData(integrationsQuery().queryKey, data);
       setName('');
       setUrl('');
+      setHeaders([]);
     },
   });
   return (
@@ -1898,8 +2028,57 @@ function Webhooks({ hooks }: { hooks: WebhookTarget[] }) {
               onChange={(e) => setUrl(e.target.value)}
             />
           </Field>
+          {headers.length ? (
+            <Field id="wh-header-0" label="Headers (sent with each post; hidden once saved)">
+              <div className="grid grid-cols-1 gap-2">
+                {headers.map((h, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: rows have no id until saved
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      id={`wh-header-${i}`}
+                      className="num w-2/5"
+                      autoComplete="off"
+                      placeholder="Authorization"
+                      aria-label="Header name"
+                      value={h.name}
+                      onChange={(e) => setHeader(i, 'name', e.target.value)}
+                    />
+                    <Input
+                      className="num min-w-0 flex-1"
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Value"
+                      aria-label="Header value"
+                      value={h.value}
+                      onChange={(e) => setHeader(i, 'value', e.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Remove header"
+                      onClick={() => setHeaders((hs) => hs.filter((_, j) => j !== i))}
+                    >
+                      <XIcon />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </Field>
+          ) : null}
           <ErrorLine error={add.error} />
           <div className="flex flex-wrap items-center gap-2">
+            {headers.length < 5 ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setHeaders((hs) => [...hs, { name: '', value: '' }])}
+              >
+                <PlusIcon />
+                Header
+              </Button>
+            ) : null}
             <span className="flex-1" />
             <Button type="submit" size="sm" disabled={!name.trim() || !url.trim() || add.isPending}>
               {add.isPending ? <RefreshCwIcon className="animate-spin" /> : <PlusIcon />}
@@ -1910,7 +2089,8 @@ function Webhooks({ hooks }: { hooks: WebhookTarget[] }) {
       </Section>
       <p className="text-xs text-muted-foreground">
         Each post is <span className="num">{'{ event, title, message, click, at }'}</span>. Messages
-        name no account, holding or amount.
+        name no account, holding or amount. For a Cloudflare Access service token, add the headers
+        CF-Access-Client-Id and CF-Access-Client-Secret.
       </p>
     </div>
   );
@@ -2033,7 +2213,7 @@ function Integrations() {
       </IntegrationRow>
       <IntegrationRow
         name="Alpaca"
-        meta="Live quotes and option chains"
+        meta="Live quotes, option chains and news"
         open={open === 'alpaca'}
         onOpenChange={toggle('alpaca')}
         badge={
@@ -2046,6 +2226,23 @@ function Integrations() {
       >
         <Alpaca status={q.data.alpaca} />
       </IntegrationRow>
+      {!q.data.dataedge.built_in && (
+        <IntegrationRow
+          name="DataEdge"
+          meta="Daily closes for Portfolio ▸ Performance"
+          open={open === 'dataedge'}
+          onOpenChange={toggle('dataedge')}
+          badge={
+            q.data.dataedge.connected ? (
+              <TestBadge test={q.data.dataedge.last_test} />
+            ) : (
+              <Badge variant="outline">Not connected</Badge>
+            )
+          }
+        >
+          <DataEdge status={q.data.dataedge} />
+        </IntegrationRow>
+      )}
       <IntegrationRow
         name="Robinhood"
         meta="Agentic account · trading sign-in"

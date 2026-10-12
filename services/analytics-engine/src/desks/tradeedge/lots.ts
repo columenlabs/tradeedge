@@ -169,7 +169,7 @@ const OCC = /\d{6}[CP]\d{8}$/;
 /** A share or fund symbol, not an option contract (`ORCL 240 C` or an OCC symbol). */
 const isShare = (symbol: string) => !symbol.includes(' ') && !OCC.test(symbol);
 /** A money market fund (FDRXX, SPAXX): cash, so no lots and no check. */
-const CASH_FUND = /^[A-Z]{3}XX$/;
+export const CASH_FUND = /^[A-Z]{3}XX$/;
 /** The rows that move shares, and so lots. */
 export const MOVES = new Set(['buy', 'sell', 'transfer_in', 'transfer_out']);
 /** A row that adds shares (or covers a short). */
@@ -206,7 +206,7 @@ const later = (t: Transaction) => (adds(t) && isShare(t.symbol as string) ? 0 : 
 const OPTION_TEXT = /\b(call|put)\b.*\bstrike of \$?([\d,.]+)/i;
 
 /** Such a trade as the contract it names, `ORCL 240 C` (no expiry is sent), so it lots on its own. */
-function contractOf(t: Transaction): Transaction {
+export function contractOf(t: Transaction): Transaction {
   const m = t.expiration === null && !t.right ? OPTION_TEXT.exec(t.description ?? '') : null;
   if (!m) return t;
   const right = (m[1] as string).toLowerCase() === 'call' ? ('C' as const) : ('P' as const);

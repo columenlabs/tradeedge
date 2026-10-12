@@ -8,6 +8,16 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AccessIdentity, AccessVerifier } from './access';
 import {
+  type Autopilot,
+  ORDER_STATUSES,
+  type PriceFeed,
+  basketIdSchema,
+  basketMoveShape,
+  basketWriteShape,
+  orderIdSchema,
+  orderWriteShape,
+} from './desks/tradeedge/autopilot';
+import {
   type Integrations,
   alpacaKeyShape,
   snaptradeAccountShape,
@@ -37,12 +47,7 @@ import {
   symbolFieldDocs,
   symbolReadShape,
 } from './desks/tradeedge/symbols';
-import {
-  type HoldingTags,
-  basketWriteShape,
-  sectorWriteShape,
-  tagsOf,
-} from './desks/tradeedge/tags';
+import { type HoldingTags, sectorWriteShape, tagsOf } from './desks/tradeedge/tags';
 import { type Trades, tradeIdSchema, tradeWriteShape } from './desks/tradeedge/trades';
 import { type Watchlist, watchSymbolSchema } from './desks/tradeedge/watchlist';
 import {
@@ -96,6 +101,13 @@ export function buildMcpServer(
   if (mine?.trades) registerTradeTools(server, mine.trades, mine.owner);
   if (mine?.watchlist) registerWatchlistTools(server, mine.watchlist, mine.owner);
   if (mine?.tags) registerTagTools(server, mine.tags, mine.owner);
+  if (mine?.autopilot)
+    registerAutopilotTools(
+      server,
+      mine.autopilot.store,
+      mine.owner,
+      mine.autopilot.priceFor(mine.owner),
+    );
   if (mine?.symbols) registerSymbolTools(server, mine.symbols, mine.owner);
   if (mine?.posts) registerPostTools(server, mine.posts, mine.owner);
   if (feedback) registerFeedbackTools(server, feedback.feedback, feedback.owner, 'trade');
@@ -111,6 +123,7 @@ export interface McpMine {
   trades?: Trades;
   watchlist?: Watchlist;
   tags?: HoldingTags;
+  autopilot?: { store: Autopilot; priceFor: (owner: string) => PriceFeed };
   symbols?: SymbolFactsService;
   posts?: Posts;
 }
@@ -119,13 +132,19 @@ function registerPostTools(server: McpServer, posts: Posts, owner: string) {
   server.registerTool(
     'post_list',
     {
-      title: 'X posts',
+      title: 'Posts and news',
       description:
-        'Posts by the X accounts you track (Settings > Integrations > X), newest first, each tagged ' +
+        'Posts by the X accounts you track (Settings > Integrations > X) and every news article ' +
+        'your own Alpaca key reads (Benzinga; source alpaca, handle the publisher, symbols its own ' +
+        'tickers) and an earnings one-liner when a company you hold or watch reports (source sec, ' +
+        'from its SEC 8-K: EPS vs the Robinhood estimate, revenue, guidance; needs the Robinhood ' +
+        'sign-in), newest first, each with its source (x, alpaca or sec) and tagged ' +
         'with symbols (tickers it is about), a macro theme with theme_conf, and sentiment from -1 ' +
         '(very bearish) to +1 (very bullish) with sentiment_conf; null where it was not tagged. ' +
-        'Checked every 2 min in market hours and every 4 h outside (Schedules in the app). Filter ' +
-        'by symbol, handle or theme; hours looks back (24 by default). Returns {store, posts}: ' +
+        'The same news posted again within the hour (by any account or source) is one post, the first, with ' +
+        'the later copies in repeats. X is checked every 2 min in market hours and every 4 h ' +
+        'outside, news the same (Schedules in the app). Filter by symbol, handle, source or ' +
+        'theme; hours looks back (24 by default). Returns {store, posts}: ' +
         'store d1 keeps 30 days, dataedge keeps them for good.',
       inputSchema: postListShape,
     },
@@ -163,25 +182,143 @@ function registerTagTools(server: McpServer, tags: HoldingTags, owner: string) {
         'account, and every option on it shows the same sector. Use it to sort holdings by industry ' +
         'or theme. Several tickers in one call; null clears one. Example: {sectors: {"TQQQ": ' +
         '"Technology", "GLDM": "Gold"}}. portfolio_read shows each position\'s sector; views group ' +
-        'and filter by the `sector` field. Returns every sector and basket.',
+        "and filter by the `sector` field. Returns every sector and each holding's basket.",
       inputSchema: sectorWriteShape,
     },
     async ({ sectors }) => json(await tags.setSectors(owner, sectors)),
   );
+}
+
+/**
+ * Autopilot (Bikram, 2026-10-12): baskets with target weights and one floating sleeve per account,
+ * and the order queue. Nothing here sends an order to a broker.
+ */
+function registerAutopilotTools(server: McpServer, ap: Autopilot, owner: string, price: PriceFeed) {
+  server.registerTool(
+    'basket_list',
+    {
+      title: 'Baskets',
+      description:
+        'Your Autopilot baskets and what is Unassigned. A basket has target weights (% per ticker), ' +
+        'a rebalance rule (monthly, quarterly or yearly on the first trading day, plus an optional ' +
+        'drift trigger in points) and a mode (off: track only; suggest: proposes orders when due). ' +
+        'It holds one sleeve per account: shares and its own cash, valued live; a sleeve keeps its ' +
+        'gains and losses, and money moves only with basket_move. Per basket: value, cash, rows ' +
+        '(symbol, shares, value, target, now, drift in points), due (calendar | drift | null), ' +
+        'next_rebalance, sleeves and open_orders. unassigned lists, per account, the cash and ' +
+        'shares no sleeve holds; accounts says which can trade (tradeable: the broker route and ' +
+        'the Trading switch in Settings > Brokers and accounts).',
+      inputSchema: {},
+    },
+    async () => json(await ap.overview(owner, price)),
+  );
+  server.registerTool(
+    'basket_read',
+    {
+      title: 'Read basket',
+      description:
+        'One basket as basket_list shows it, plus preview: the orders a rebalance would propose ' +
+        'now (sells in retirement accounts first, buys where the cash is; by_hand when the account ' +
+        'cannot trade).',
+      inputSchema: { id: basketIdSchema },
+    },
+    async ({ id }) => {
+      const [b, preview] = await Promise.all([
+        ap.read(owner, id, price),
+        ap.preview(owner, id, price),
+      ]);
+      return json({ ...b, preview });
+    },
+  );
   server.registerTool(
     'basket_write',
     {
-      title: 'Label or tag holdings with a basket',
+      title: 'Write basket',
       description:
-        'Label or tag holdings with a basket (the holdings label per position). Put holdings in a basket, e.g. the positions one strategy holds. A basket belongs to a ' +
-        'holding: pass tickers (OCC symbols for options) and, to touch one account only, its ' +
-        'portfolio_id; without it every account holding the symbols gets the basket. null takes ' +
-        'them out. Example: {basket: "9-sig", symbols: ["TQQQ", "GLDM"]}. Reuse a name already in ' +
-        "use (portfolio_read shows each position's basket). Views group and filter by the " +
-        '`basket` field. Returns every sector and basket.',
+        'Create a basket or change one: name, targets (adding up to 100), rebalance, drift, mode ' +
+        'and, optionally, the whole set of sleeves: per account the shares (from what it holds ' +
+        'unassigned) and cash (from its unassigned cash) that go in. Moving shares in sells ' +
+        'nothing. Example: {name: "cyber", targets: {"CRWD": 25, "PANW": 25, "ZS": 25, "FTNT": 25}, ' +
+        'rebalance: "monthly", drift: 5, mode: "suggest", sleeves: [{portfolio_id: "pf_…", ' +
+        'shares: {"CRWD": 12}, cash: 3000}]}. Then basket_rebalance proposes the trades.',
       inputSchema: basketWriteShape,
     },
-    async (w) => json(await tags.setBasket(owner, w)),
+    async (input) => json(await ap.write(owner, input, price)),
+  );
+  server.registerTool(
+    'basket_delete',
+    {
+      title: 'Delete basket',
+      description:
+        'Delete a basket: its shares and cash go back to Unassigned and its open orders are ' +
+        'cancelled. Nothing is sold. Confirm with the person first.',
+      inputSchema: { id: basketIdSchema },
+    },
+    async ({ id }) => {
+      await ap.delete(owner, id);
+      return json({ ok: true });
+    },
+  );
+  server.registerTool(
+    'basket_move',
+    {
+      title: 'Move cash',
+      description:
+        "Move cash inside one account between a basket's sleeve and another basket or Unassigned " +
+        '(from or to null). propose: true also proposes the buys that bring the receiving basket ' +
+        'toward its weights in that account (replacing its open orders).',
+      inputSchema: basketMoveShape,
+    },
+    async (m) => json(await ap.move(owner, m, price)),
+  );
+  server.registerTool(
+    'basket_rebalance',
+    {
+      title: 'Propose a rebalance',
+      description:
+        'Propose the orders that bring a basket back to its target weights, replacing its open ' +
+        'ones. Orders for accounts that can trade land in the Autopilot queue as proposed (the ' +
+        'person approves them); the rest land in To place as by_hand. Nothing is sent to a broker.',
+      inputSchema: { id: basketIdSchema },
+    },
+    async ({ id }) => json(await ap.rebalance(owner, id, price)),
+  );
+  server.registerTool(
+    'order_list',
+    {
+      title: 'Orders',
+      description:
+        'Autopilot orders, newest first: status (proposed, approved, sent, filled, rejected, ' +
+        'cancelled, by_hand), basket, account, side, symbol, qty, price (the estimate it was sized ' +
+        'at), via and send_at (the window: 5 minutes after the open, limit at mid). Filter by status ' +
+        'or basket_id.',
+      inputSchema: {
+        status: z.array(z.enum(ORDER_STATUSES)).optional(),
+        basket_id: basketIdSchema.optional(),
+      },
+    },
+    async (q) => json(await ap.orders(owner, q)),
+  );
+  server.registerTool(
+    'order_read',
+    {
+      title: 'Read order',
+      description: 'One Autopilot order.',
+      inputSchema: { id: orderIdSchema },
+    },
+    async ({ id }) => json(await ap.order(owner, id)),
+  );
+  server.registerTool(
+    'order_write',
+    {
+      title: 'Approve, reject or place orders',
+      description:
+        'Act on Autopilot orders: approve or reject proposed ones, undo an approval, mark a by_hand ' +
+        'order placed (its shares and cash move in the sleeve), or cancel an open one. Approving ' +
+        "is the person's call: ask before you approve.",
+      inputSchema: orderWriteShape,
+    },
+    async ({ ids, action }) => json(await ap.act(owner, ids, action)),
   );
 }
 
@@ -416,7 +553,8 @@ function registerPortfolioTools(
         '(total on record, ytd this year). For a quantity check in a manual account, send the missing ' +
         'lots; in a SnapTrade account, run integration_sync. cash is signed: negative is margin ' +
         'borrowed in that account. Each position carries its sector (set ' +
-        'with sector_write) and basket (set with basket_write), null when unset.',
+        'with sector_write) and basket (the Autopilot basket whose sleeve holds it, see ' +
+        'basket_list), null when unset.',
       inputSchema: { id: portfolioIdSchema },
     },
     async ({ id }) => {
@@ -662,6 +800,8 @@ export interface McpAuth {
   trades?: Trades;
   watchlist?: Watchlist;
   tags?: HoldingTags;
+  /** basket_* and order_* tools (Autopilot). Omitted → not registered. */
+  autopilot?: { store: Autopilot; priceFor: (owner: string) => PriceFeed };
   /** Feedback tools and the reply footer, scoped to the signed-in caller. Omitted → not registered. */
   feedback?: Feedback;
   /** custom_view_* tools, scoped to the signed-in caller. Omitted → not registered. */
@@ -709,6 +849,7 @@ export function mcpRoutes(market: MarketService, auth: McpAuth = {}, ctx?: OpCon
       trades: auth.trades,
       watchlist: auth.watchlist,
       tags: auth.tags,
+      autopilot: auth.autopilot,
       symbols: auth.symbols,
       posts: auth.posts,
     };

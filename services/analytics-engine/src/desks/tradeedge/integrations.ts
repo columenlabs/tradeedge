@@ -16,15 +16,25 @@
  *   webhooks   the person's own URLs that get each event as JSON (Bikram, 2026-10-12), any number.
  *   events     which targets (ntfy, each webhook) each event goes to (Settings ▸ Events): every target
  *              gets every event unless the person turns it off. Messages name no account, holding or amount.
+ *   dataedge   a self-hosted TradeEdge's DataEdge address and key (an Access service token, Bikram,
+ *              2026-10-12): the Performance page's daily closes. The suite reads them in process instead.
  */
 import { AlpacaClient, type AlpacaConfig } from '@edgedesk/providers';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
+import type { HistoryService } from '../../history';
 import { MarketService } from '../../market';
 import { type Vault, withRetry } from '../../vault';
+import type { EarningsDoc } from './earnings';
 import type { Logs } from './logs';
+import {
+  DataEdgeError,
+  type MarketHistory,
+  builtInHistory,
+  dataedgeHistory,
+} from './market-history';
 import { PortfolioInvalid, type Portfolios, type TaxType, portfolioOwner } from './portfolio';
 import {
   ROBINHOOD,
@@ -59,7 +69,8 @@ export type Provider =
   | 'ntfy'
   | 'email'
   | 'webhooks'
-  | 'events';
+  | 'events'
+  | 'dataedge';
 
 export interface SyncReport {
   at: string;
@@ -101,6 +112,10 @@ interface AlpacaDoc {
   secret_key: string;
   saved_at: string;
   last_test?: KeyTest | null;
+  /** News (posts.ts): where the next check starts (ISO), the ids already read at that time, and the last check. */
+  news_since?: string;
+  news_ids?: string[];
+  last_news?: XCheck | null;
 }
 interface RobinhoodDoc {
   /** From Robinhood's dynamic client registration, for `redirect_uri`. */
@@ -110,6 +125,8 @@ interface RobinhoodDoc {
   pending: { state: string; verifier: string; at: string } | null;
   tokens: RobinhoodTokens | null;
   connected_at: string | null;
+  /** The earnings calendar and the reports found (earnings.ts), kept with the sign-in it comes from. */
+  earnings?: EarningsDoc;
   /** The last test: the Agentic account (masked) and whether its trades wait for approval in Robinhood's app. */
   last_test: {
     at: string;
@@ -158,6 +175,8 @@ interface Webhook {
   id: string;
   name: string;
   url: string;
+  /** Headers sent with each post, e.g. Authorization or Access service-token headers (Bikram, 2026-10-12). */
+  headers?: { name: string; value: string }[];
   created_at: string;
   last_test: KeyTest | null;
 }
@@ -168,7 +187,16 @@ interface EventsDoc {
   /** Targets (`ntfy`, `email` or a webhook id) each event is turned off for; anything not listed is on. */
   off: Partial<Record<NotifyEvent, string[]>>;
 }
+interface DataEdgeDoc {
+  /** DataEdge's origin, `https://data.example.com`. */
+  url: string;
+  client_id: string;
+  client_secret: string;
+  saved_at: string;
+  last_test: KeyTest | null;
+}
 interface Docs {
+  dataedge: DataEdgeDoc;
   snaptrade: SnapTradeDoc;
   alpaca: AlpacaDoc;
   robinhood: RobinhoodDoc;
@@ -181,6 +209,11 @@ interface Docs {
 
 /** What notifies: only events that exist (Bikram picks any new one). */
 export const NOTIFY_EVENTS = {
+  earnings_reported: {
+    label: 'Earnings reported',
+    detail:
+      'A company you hold or watch filed its results (SEC 8-K): EPS vs the estimate, revenue and guidance.',
+  },
   broker_signin: {
     label: 'Broker needs signing in again',
     detail: 'SnapTrade lost its connection to a broker, so Holdings stop updating.',
@@ -201,6 +234,31 @@ export const webhookShape = {
     .max(2000)
     .refine((u) => u.startsWith('https://'), 'The address must start with https://')
     .describe('The https address that gets each event as JSON.'),
+  headers: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .trim()
+          .regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/, 'Not a valid header name')
+          .refine(
+            (n) =>
+              !['host', 'content-type', 'content-length', 'user-agent'].includes(n.toLowerCase()),
+            'TradeEdge sets that header itself',
+          ),
+        value: z
+          .string()
+          .trim()
+          .min(1)
+          .max(4000)
+          .regex(/^[^\r\n]*$/, 'One line only'),
+      }),
+    )
+    .max(5)
+    .optional()
+    .describe(
+      'Headers sent with each post (up to 5), e.g. Authorization, or CF-Access-Client-Id and CF-Access-Client-Secret for a Cloudflare Access service token.',
+    ),
 };
 /** A webhook address without its path and query, which often hold a secret. */
 const maskUrl = (u: string) => {
@@ -219,6 +277,15 @@ export interface Notice {
 }
 /** Sends one notification email (the suite's Email Service binding); absent → no Email row. */
 export type SendNotice = (to: string, n: Notice) => Promise<void>;
+
+/** How long ago `ms` was, roughly: `40 s`, `3 min`, `2 h`, `4 d`. */
+function ago(ms: number) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 90) return `${s} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  if (s < 129_600) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86_400)} d`;
+}
 
 const passed = (detail: string): KeyTest => ({
   at: new Date().toISOString(),
@@ -273,6 +340,17 @@ export const snaptradeKeyShape = {
 export const alpacaKeyShape = {
   key_id: z.string().trim().min(1).max(200).describe('Alpaca API key ID.'),
   secret_key: z.string().trim().min(1).max(400).describe('Alpaca secret key.'),
+};
+export const dataedgeShape = {
+  url: z
+    .string()
+    .trim()
+    .url()
+    .refine((u) => u.startsWith('https://'), 'an https address')
+    .transform((u) => new URL(u).origin)
+    .describe("DataEdge's address, e.g. https://data.edgedesk.app."),
+  client_id: z.string().trim().min(1).max(200).describe('Access service token client ID.'),
+  client_secret: z.string().trim().min(1).max(400).describe('Access service token client secret.'),
 };
 export const xShape = {
   api_key: z.string().trim().min(8).max(200).optional().describe('Your twitterapi.io API key.'),
@@ -351,12 +429,18 @@ export class Integrations {
       logs?: Logs;
       /** Notification email; omitted where the host has no email sender (self-host). */
       mail?: SendNotice;
+      /** The suite's ClickHouse: Performance reads closes from it, so there is no DataEdge row. */
+      history?: HistoryService;
       fetch?: FetchFn;
     },
   ) {}
 
   /** Told when a person connects or disconnects X, so their X schedules start or stop (schedules.ts). */
   onXChange?: (owner: string, connected: boolean) => Promise<void>;
+  /** Told when a person's Robinhood sign-in is tested or removed, so the earnings schedules start or stop. */
+  onRobinhoodChange?: (owner: string, connected: boolean) => Promise<void>;
+  /** Told when a person's Alpaca key is saved, tested or removed, so Check news starts or stops. */
+  onAlpacaChange?: (owner: string, connected: boolean) => Promise<void>;
 
   // ── the sealed rows ──
 
@@ -431,7 +515,7 @@ export class Integrations {
    * false skips SnapTrade (the header's sync status reads only what is stored).
    */
   async status(owner: string, live = true) {
-    const [st, alp, rh, x, nt, em, wh, ev] = await Promise.all([
+    const [st, alp, rh, x, nt, em, wh, ev, de] = await Promise.all([
       this.get(owner, 'snaptrade'),
       this.get(owner, 'alpaca'),
       this.get(owner, 'robinhood'),
@@ -440,8 +524,21 @@ export class Integrations {
       this.get(owner, 'email'),
       this.get(owner, 'webhooks'),
       this.get(owner, 'events'),
+      this.get(owner, 'dataedge'),
     ]);
     return {
+      dataedge: this.opts.history?.available
+        ? { built_in: true as const, connected: true as const }
+        : de
+          ? {
+              built_in: false as const,
+              connected: true as const,
+              url: de.url,
+              client_id: hint(de.client_id),
+              saved_at: de.saved_at,
+              last_test: de.last_test,
+            }
+          : { built_in: false as const, connected: false as const },
       email: em
         ? {
             available: !!this.opts.mail,
@@ -466,6 +563,7 @@ export class Integrations {
         id: h.id,
         name: h.name,
         url: maskUrl(h.url),
+        headers: (h.headers ?? []).map((x) => ({ name: x.name, value: hint(x.value) })),
         created_at: h.created_at,
         last_test: h.last_test,
       })),
@@ -505,6 +603,7 @@ export class Integrations {
             key_id: hint(alp.key_id),
             saved_at: alp.saved_at,
             last_test: alp.last_test ?? null,
+            last_news: alp.last_news ?? null,
           }
         : { connected: false as const },
     };
@@ -713,6 +812,22 @@ export class Integrations {
     return this.status(owner);
   }
 
+  /**
+   * How orders reach each synced account, by portfolio id (Autopilot): `via` the broker's route and
+   * `trade` the person's switch. An account left out (manual, or SnapTrade not reachable) is read-only.
+   */
+  async tradeable(
+    owner: string,
+  ): Promise<Map<string, { via: 'snaptrade' | 'robinhood' | null; trade: boolean }>> {
+    const out = new Map<string, { via: 'snaptrade' | 'robinhood' | null; trade: boolean }>();
+    const st = (await this.status(owner)).snaptrade;
+    if (!st.connected) return out;
+    for (const b of st.brokers ?? [])
+      for (const a of b.accounts)
+        if (a.portfolio_id) out.set(a.portfolio_id, { via: a.trading.via, trade: a.trade });
+    return out;
+  }
+
   /** Pulls every included account (or one) from SnapTrade into Holdings. */
   async sync(owner: string, only?: string): Promise<SyncReport> {
     const t0 = performance.now();
@@ -881,18 +996,36 @@ export class Integrations {
       last_test: passed(detail),
     }));
     this.markets.delete(owner);
+    await this.onAlpacaChange?.(owner, true);
     return this.status(owner);
   }
 
-  /** One SPY quote with the key: what a test shows when it works. */
+  /**
+   * One SPY quote and the newest news article with the key: what a test shows when it works, with
+   * how old that article is (news can lag on a free plan).
+   */
   private async alpacaRead(key: { key_id: string; secret_key: string }) {
-    const q = await new AlpacaClient({
-      ...this.opts.alpaca,
-      keyId: key.key_id,
-      secretKey: key.secret_key,
-    }).getUnderlyingQuote('SPY');
+    const client = this.alpacaClient(key);
+    const q = await client.getUnderlyingQuote('SPY');
     const px = q.last ?? q.prevClose;
-    return px == null ? 'SPY quote' : `SPY $${px.toFixed(2)}`;
+    const quote = px == null ? 'SPY quote' : `SPY $${px.toFixed(2)}`;
+    let news: string;
+    try {
+      const [n] = await client.getNews({
+        start: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+        pages: 1,
+        limit: 1,
+        sort: 'desc',
+      });
+      news = n ? `news ${ago(Date.parse(n.createdAt))} old` : 'no news in 3 days';
+    } catch (err) {
+      news = `no news (${(err as Error).message.slice(0, 80)})`;
+    }
+    return `${quote} · ${news}`;
+  }
+
+  alpacaClient(key: { key_id: string; secret_key: string }) {
+    return new AlpacaClient({ ...this.opts.alpaca, keyId: key.key_id, secretKey: key.secret_key });
   }
 
   /** Tests the saved key with one quote and keeps the result. */
@@ -907,13 +1040,31 @@ export class Integrations {
       result = failed(err);
     }
     await this.update(owner, 'alpaca', (p) => (p ? { ...p, last_test: result } : p));
-    await this.noteTest(owner, 'user', 'Alpaca test: SPY quote', result, t0);
+    await this.noteTest(owner, 'user', 'Alpaca test: SPY quote and news', result, t0);
+    await this.onAlpacaChange?.(owner, true);
     return this.status(owner, false);
   }
 
   async deleteAlpaca(owner: string) {
     await this.update(owner, 'alpaca', () => null);
     this.markets.delete(owner);
+    await this.onAlpacaChange?.(owner, false);
+  }
+
+  /** The person's Alpaca key and where the last news check left off; null when not connected. */
+  alpacaDoc(owner: string) {
+    return this.get(owner, 'alpaca');
+  }
+
+  /** Records a news check: where the next one starts and how this one went. */
+  async newsChecked(
+    owner: string,
+    check: XCheck,
+    since?: { news_since: string; news_ids: string[] },
+  ): Promise<void> {
+    await this.update(owner, 'alpaca', (p) =>
+      p ? { ...p, ...(since ?? {}), last_news: check } : p,
+    );
   }
 
   /**
@@ -932,6 +1083,65 @@ export class Integrations {
       : this.opts.market;
     this.markets.set(owner, { at: Date.now(), market });
     return market;
+  }
+
+  // ── DataEdge (self-host: daily closes for Performance) ──
+
+  /** Where this person's daily closes come from: the suite's own, their DataEdge key, or nowhere. */
+  async history(owner: string): Promise<MarketHistory | null> {
+    const own = builtInHistory(this.opts.history);
+    if (own) return own;
+    const doc = await this.get(owner, 'dataedge');
+    return doc ? dataedgeHistory(doc, this.opts.fetch) : null;
+  }
+
+  /** One read of SPY's last two weeks of closes with the key: what a test shows when it works. */
+  private async dataedgeRead(key: { url: string; client_id: string; client_secret: string }) {
+    const to = new Date().toISOString().slice(0, 10);
+    const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
+    const last = (await dataedgeHistory(key, this.opts.fetch).closes(['SPY'], from, to)).SPY?.at(
+      -1,
+    );
+    if (!last) throw new DataEdgeError('DataEdge answered, but has no SPY closes.');
+    return `SPY $${last.close.toFixed(2)} on ${last.date}`;
+  }
+
+  /** Checks the key with one read, then stores it (sealed). Refused in the suite, which needs none. */
+  async saveDataEdge(
+    owner: string,
+    key: { url: string; client_id: string; client_secret: string },
+  ) {
+    if (this.opts.history?.available)
+      throw new IntegrationInvalid('This TradeEdge reads DataEdge directly: no key is needed.');
+    const detail = await this.dataedgeRead(key).catch((err: unknown) => {
+      throw new IntegrationInvalid((err as Error).message);
+    });
+    await this.update(owner, 'dataedge', () => ({
+      ...key,
+      saved_at: new Date().toISOString(),
+      last_test: passed(detail),
+    }));
+    return this.status(owner, false);
+  }
+
+  /** Tests the saved key with one read and keeps the result. */
+  async dataedgeTest(owner: string) {
+    const key = await this.get(owner, 'dataedge');
+    if (!key) throw new IntegrationNotConnected('DataEdge is not connected: add its key first.');
+    const t0 = performance.now();
+    let result: KeyTest;
+    try {
+      result = passed(await this.dataedgeRead(key));
+    } catch (err) {
+      result = failed(err);
+    }
+    await this.update(owner, 'dataedge', (p) => (p ? { ...p, last_test: result } : p));
+    await this.noteTest(owner, 'user', 'DataEdge test: SPY closes', result, t0);
+    return this.status(owner, false);
+  }
+
+  async deleteDataEdge(owner: string) {
+    await this.update(owner, 'dataedge', () => null);
   }
 
   // ── X (twitterapi.io) ──
@@ -1213,6 +1423,7 @@ export class Integrations {
       };
     }
     await this.update(owner, 'robinhood', (p) => (p ? { ...p, last_test: result } : p));
+    await this.onRobinhoodChange?.(owner, true);
     await this.opts.logs?.note(owner, {
       category: 'mcp',
       what: 'Robinhood test: get_accounts, get_trade_approval_setting',
@@ -1226,6 +1437,27 @@ export class Integrations {
   /** Deletes the Robinhood tokens; TradeEdge can no longer reach the account. */
   async deleteRobinhood(owner: string) {
     await this.update(owner, 'robinhood', () => null);
+    await this.onRobinhoodChange?.(owner, false);
+  }
+
+  /** The earnings calendar and reports found; null without a Robinhood sign-in. */
+  async earningsDoc(owner: string): Promise<EarningsDoc | null> {
+    const doc = await this.get(owner, 'robinhood');
+    return doc?.tokens
+      ? (doc.earnings ?? { refreshed_at: null, calendar: [], reported: [] })
+      : null;
+  }
+
+  /** Changes the earnings document kept with the Robinhood sign-in. */
+  async earningsUpdate(owner: string, change: (d: EarningsDoc) => EarningsDoc): Promise<void> {
+    await this.update(owner, 'robinhood', (p) =>
+      p
+        ? {
+            ...p,
+            earnings: change(p.earnings ?? { refreshed_at: null, calendar: [], reported: [] }),
+          }
+        : p,
+    );
   }
 
   // ── Notifications (ntfy) ──
@@ -1267,7 +1499,11 @@ export class Integrations {
   private async post(hook: Webhook, event: NotifyEvent | 'test', n: Notice) {
     const res = await (this.opts.fetch ?? fetch)(hook.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'TradeEdge' },
+      headers: {
+        ...Object.fromEntries((hook.headers ?? []).map((x) => [x.name, x.value])),
+        'Content-Type': 'application/json',
+        'User-Agent': 'TradeEdge',
+      },
       body: JSON.stringify({ event, ...n, at: new Date().toISOString() }),
     });
     if (!res.ok) throw new Error(`webhook ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -1377,7 +1613,10 @@ export class Integrations {
 
   // ── Webhooks ──
 
-  async addWebhook(owner: string, hook: { name: string; url: string }) {
+  async addWebhook(
+    owner: string,
+    hook: { name: string; url: string; headers?: { name: string; value: string }[] },
+  ) {
     await this.update(owner, 'webhooks', (prev) => {
       const hooks = prev?.hooks ?? [];
       if (hooks.length >= MAX_WEBHOOKS)
@@ -1589,6 +1828,16 @@ export function integrationRoutes(svc: Integrations) {
     const p = await parse(c, { reconnect: z.string().trim().min(1).max(100).optional() });
     if (!p.success) return c.json(invalid(p.error.issues), 400);
     return c.json(await svc.portal(owner(c), p.data.reconnect));
+  });
+  r.put('/dataedge', async (c) => {
+    const p = await parse(c, dataedgeShape);
+    if (!p.success) return c.json(invalid(p.error.issues), 400);
+    return c.json(await svc.saveDataEdge(owner(c), p.data));
+  });
+  r.post('/dataedge/test', async (c) => c.json(await svc.dataedgeTest(owner(c))));
+  r.delete('/dataedge', async (c) => {
+    await svc.deleteDataEdge(owner(c));
+    return c.json({ ok: true });
   });
   r.put('/alpaca', async (c) => {
     const p = await parse(c, alpacaKeyShape);

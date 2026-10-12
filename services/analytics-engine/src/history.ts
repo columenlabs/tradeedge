@@ -3,7 +3,13 @@
  * immutable once written, so reads are cached for a few minutes (with the
  * same in-flight dedup as live data).
  */
-import { ClickHouseClient, type FetchLike, HistoryStore } from '@edgedesk/clickhouse';
+import {
+  ClickHouseClient,
+  type DailyCloses,
+  type FetchLike,
+  HistoryStore,
+  type KeyDates,
+} from '@edgedesk/clickhouse';
 import type {
   HistoryCoverage,
   OptionChain,
@@ -124,6 +130,16 @@ export class HistoryService {
     to: string,
   ): Promise<Record<string, { date: string; close: number }[]>> {
     return this.store ? this.store.rawCloses(symbols, from, to) : Promise.resolve({});
+  }
+
+  /** Daily closes, adjusted closes and option marks (TradeEdge Performance). Not cached, like fundNavs. */
+  dailyCloses(symbols: string[], from: string, to: string): Promise<DailyCloses> {
+    return this.s().dailyCloses(symbols, from, to);
+  }
+
+  /** FOMC, CPI and Jobs days. Not cached, like fundNavs. */
+  keyDates(from: string, to: string): Promise<KeyDates> {
+    return this.s().keyDates(from, to);
   }
 
   /** DataEdge symbol fields (trailing P/E, technicals). Not cached, like fundNavs. Empty when

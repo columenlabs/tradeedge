@@ -8,6 +8,8 @@
  *   user       the person's own changes from the app or REST (writes only)
  *   backend    work that failed on the server (5xx) while serving the person
  *   x          each call to twitterapi.io: checks for new posts (with the posts and calls) and key tests
+ *   news       each Alpaca news check (with the articles read)
+ *   earnings   each earnings calendar refresh and report check (Robinhood and SEC calls)
  *   schedules  the person's schedules that touch no outside service (Prune old posts)
  */
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
@@ -17,7 +19,16 @@ import type { D1Like } from '../../d1';
 import type { Vault } from '../../vault';
 import { portfolioOwner } from './portfolio';
 
-export const LOG_CATEGORIES = ['snaptrade', 'mcp', 'user', 'backend', 'x', 'schedules'] as const;
+export const LOG_CATEGORIES = [
+  'snaptrade',
+  'mcp',
+  'user',
+  'backend',
+  'x',
+  'news',
+  'earnings',
+  'schedules',
+] as const;
 export type LogCategory = (typeof LOG_CATEGORIES)[number];
 
 export interface LogEvent {

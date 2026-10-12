@@ -4,7 +4,9 @@ import {
   type AnyQuote,
   PORTFOLIO_DOMAINS,
   type PortfolioDomain,
+  type PostDomain,
   addToWatchlist,
+  autopilotQuery,
   deleteLogView,
   deletePortfolioView,
   deletePostView,
@@ -38,13 +40,20 @@ import { Input } from '@edgedesk/app-shell/ui/input';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import {
+  Bot,
   Briefcase,
   Grid3x3,
+  Hand,
+  History,
+  LayoutDashboard,
   LayoutGrid,
+  LineChart,
   ListFilter,
   ListTree,
   type LucideIcon,
+  PenLine,
   Plus,
+  ShoppingBasket,
   Table2,
   Wallet,
 } from 'lucide-react';
@@ -203,7 +212,7 @@ function WatchlistSection() {
 }
 
 /**
- * Portfolio: the app views (All accounts, Transactions; read-only, so no trash), then the person's
+ * Portfolio: Performance, the app views (All accounts, Transactions; read-only, so no trash), then the person's
  * own views of holdings and transactions, each with its icon. `+` starts a new holdings view.
  */
 function PortfolioSection() {
@@ -252,13 +261,23 @@ function PortfolioSection() {
         if (v) remove.mutate({ domain: v.domain, id: v.id });
       }}
       removeLabel={(item) => `Delete view ${item.title}`}
-      items={[...views.filter((v) => v.app), ...views.filter((v) => !v.app)].map((v) => ({
-        id: `${v.domain}/${v.id}`,
-        title: v.name,
-        to: portfolioViewPath(v),
-        icon: viewIcon(v.config),
-        fixed: v.app,
-      }))}
+      items={[
+        // Performance (Bikram, 2026-10-12): a fixed page, not a view.
+        {
+          id: 'performance',
+          title: 'Performance',
+          to: '/portfolio/performance',
+          icon: LineChart,
+          fixed: true,
+        },
+        ...[...views.filter((v) => v.app), ...views.filter((v) => !v.app)].map((v) => ({
+          id: `${v.domain}/${v.id}`,
+          title: v.name,
+          to: portfolioViewPath(v),
+          icon: viewIcon(v.config),
+          fixed: v.app,
+        })),
+      ]}
     />
   );
 }
@@ -322,6 +341,55 @@ function SymbolsSection() {
 }
 
 /**
+ * Autopilot (Bikram, 2026-10-12): Overview, one item per basket (a dot when a rebalance is due, a
+ * hand in Suggest mode), then Autopilot queue, To place and Order history. `+` starts a new basket.
+ */
+function AutopilotSection() {
+  const navigate = useNavigate();
+  const overview = useQuery(autopilotQuery());
+  const o = overview.data;
+  const count = (n: number | undefined, warn = false) =>
+    n ? <span className={cn(warn && 'text-warning')}>{n}</span> : undefined;
+  return (
+    <SidebarSection
+      label="Autopilot"
+      loading={overview.isPending}
+      onAdd={() => void navigate({ to: '/baskets/new' })}
+      addLabel="New basket"
+      items={[
+        { id: 'overview', title: 'Overview', to: '/autopilot', icon: LayoutDashboard },
+        ...(o?.baskets ?? []).map((b) => ({
+          id: b.id,
+          title: b.name,
+          to: `/baskets/${b.id}`,
+          icon: ShoppingBasket,
+          badge: b.due ? (
+            <span aria-label="Rebalance due" className="size-2 rounded-full bg-warning" />
+          ) : b.mode === 'suggest' ? (
+            <Hand aria-label="Suggest" className="size-3.5 text-muted-foreground" />
+          ) : undefined,
+        })),
+        {
+          id: 'queue',
+          title: 'Autopilot queue',
+          to: '/orders/queue',
+          icon: Bot,
+          badge: count(o?.queue),
+        },
+        {
+          id: 'to-place',
+          title: 'To place',
+          to: '/orders/to-place',
+          icon: PenLine,
+          badge: count(o?.to_place, true),
+        },
+        { id: 'history', title: 'Order history', to: '/orders/history', icon: History },
+      ]}
+    />
+  );
+}
+
+/**
  * Posts (Bikram, 2026-10-12): what the tracked X accounts post. The app views Feed, By symbol and
  * Macro, then the person's own. `+` starts a new view of posts.
  */
@@ -354,8 +422,7 @@ function PostsSection() {
     },
   });
   const remove = useMutation({
-    mutationFn: (v: { domain: 'posts' | 'post_symbols'; id: string }) =>
-      deletePostView(v.domain, v.id),
+    mutationFn: (v: { domain: PostDomain; id: string }) => deletePostView(v.domain, v.id),
     onSuccess: (_, v) => {
       void qc.invalidateQueries({ queryKey: listKey });
       if (path === postViewPath(v)) void navigate({ to: '/posts/$id', params: { id: 'feed' } });
@@ -436,6 +503,7 @@ export function StrategyShell() {
             <TradesSection />
             <ScreenersSection />
             <WatchlistSection />
+            <AutopilotSection />
             <PortfolioSection />
             <SymbolsSection />
             <PostsSection />

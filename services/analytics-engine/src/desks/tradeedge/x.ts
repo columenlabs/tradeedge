@@ -49,14 +49,23 @@ export interface XCredit {
   bonus: number;
 }
 
-/** One post as TradeEdge keeps it. */
+/**
+ * Where a post came from (Bikram, 2026-10-12): an X account, Alpaca's news (Benzinga), or a
+ * company's earnings 8-K at the SEC (earnings.ts).
+ */
+export const POST_SOURCES = { x: 'X', alpaca: 'Alpaca', sec: 'SEC' } as const;
+export type PostSource = keyof typeof POST_SOURCES;
+
+/** One post as TradeEdge keeps it: an X post, or a news article. */
 export interface Post {
-  /** X's post id. */
+  /** X's post id, `alpaca:<article id>` or `sec:<accession number>`. */
   id: string;
+  /** Absent on posts stored before sources existed: those are X. */
+  source?: PostSource;
   url: string;
   /** When it was posted, ISO. */
   at: string;
-  /** The account, without @, lowercase. */
+  /** The X account, without @, lowercase; for news, the publisher (`benzinga`); `sec` for a filing. */
   handle: string;
   name: string;
   text: string;
@@ -68,6 +77,10 @@ export interface Post {
   /** −1 (very bearish) … +1 (very bullish) (Clef), null when not tagged. */
   sentiment: number | null;
   sentiment_conf: number | null;
+  /** The id of the earlier post this one repeats (same news from another account), else absent. */
+  dup_of?: string | null;
+  /** On a read: later posts of the same news, folded into this one, oldest first. */
+  repeats?: Post[];
 }
 
 interface RawTweet {
@@ -89,6 +102,10 @@ export function normalizeHandle(s: string): string | null {
     ?.toLowerCase();
   return h && /^[a-z0-9_]{1,15}$/.test(h) ? h : null;
 }
+
+/** X escapes `&`, `<` and `>` in post text; show them as written. */
+const unescapeText = (s: string) =>
+  s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
 export class TwitterApiClient {
   /** Requests made, for Logs (each is billed). */
@@ -174,7 +191,7 @@ export class TwitterApiClient {
             at: new Date(at).toISOString(),
             handle,
             name: t.author?.name ?? handle,
-            text: t.text ?? '',
+            text: unescapeText(t.text ?? ''),
             symbols: [],
             theme: null,
             theme_conf: null,
@@ -195,13 +212,28 @@ export interface AiBinding {
   run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
-const SYMBOLS_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
+const SYMBOLS_MODEL = '@cf/meta/llama-3.2-3b-instruct';
 const DECISION_MODEL = '@cf/cloudflare/clef-flash';
 const SYMBOLS_PER_CALL = 15;
+const EMBED_MODEL = '@cf/baai/bge-m3';
+/**
+ * Cosine similarity (bge-m3) at or above which two posts may be the same news; Clef-flash then
+ * decides. Tested 2026-10-12 on squawk reposts: repeats 0.80 to 0.90, but two different statements
+ * by one speaker in one account's style reached 0.84, which Clef rejects.
+ */
+const NEAR_NEWS = 0.78;
+/**
+ * Clef's probability of "same news" needed to fold a post (tested 2026-10-12: repeats 0.85 to 0.96,
+ * different news among the close pairs 0.55).
+ */
+const SAME_NEWS_P = 0.75;
+/** A repeat is looked for among posts from this long before. */
+const SAME_NEWS_MS = 3_600_000;
+const EMBED_PER_CALL = 50;
 const TICKER = /^[A-Z][A-Z0-9.]{0,9}$/;
 
 /**
- * Tags posts in place, all on Workers AI: symbols with a chat model (one call per 15 posts),
+ * Tags posts in place, all on Workers AI: symbols with a chat model (one call per 15 X posts; news keeps its own),
  * sentiment and theme with Clef-flash (one call per post). Without the binding, or when a call
  * fails, the fields stay as they are; `notes` says which.
  */
@@ -212,9 +244,11 @@ export class PostTagger {
     const notes: string[] = [];
     if (!posts.length) return notes;
     if (!this.ai) return ['Workers AI not configured: posts are not tagged'];
-    for (let i = 0; i < posts.length; i += SYMBOLS_PER_CALL) {
+    // News and filings come with their tickers; only X posts need them read.
+    const unread = posts.filter((p) => (p.source ?? 'x') === 'x');
+    for (let i = 0; i < unread.length; i += SYMBOLS_PER_CALL) {
       try {
-        await this.symbols(posts.slice(i, i + SYMBOLS_PER_CALL));
+        await this.symbols(unread.slice(i, i + SYMBOLS_PER_CALL));
       } catch (err) {
         notes.push(`Symbols: ${(err as Error).message.slice(0, 120)}`);
         break;
@@ -232,6 +266,70 @@ export class PostTagger {
     if (errors.length)
       notes.push(`Clef failed on ${errors.length} of ${posts.length}: ${errors[0]?.slice(0, 120)}`);
     return notes;
+  }
+
+  /**
+   * Marks each new post that repeats news already in `recent` or in an earlier new post (any
+   * account, the same one included, within the hour) with `dup_of`: close by meaning (Workers AI
+   * embeddings), then confirmed by Clef-flash. Returns how many, or throws when a model fails.
+   */
+  async markRepeats(fresh: Post[], recent: Post[]): Promise<number> {
+    if (!this.ai || !fresh.length) return 0;
+    const earlier = recent.filter((p) => !p.dup_of);
+    const all = [...earlier, ...fresh];
+    const vecs: number[][] = [];
+    for (let i = 0; i < all.length; i += EMBED_PER_CALL) {
+      const r = (await this.ai.run(EMBED_MODEL, {
+        text: all.slice(i, i + EMBED_PER_CALL).map((p) => p.text.slice(0, 2000)),
+      })) as { data?: number[][] };
+      if (!Array.isArray(r?.data)) throw new Error('no embeddings in the answer');
+      vecs.push(...r.data);
+    }
+    const unit = vecs.map((v) => {
+      const n = Math.hypot(...v) || 1;
+      return v.map((x) => x / n);
+    });
+    const cos = (a: number[], b: number[]) => a.reduce((s, x, k) => s + x * (b[k] ?? 0), 0);
+    let n = 0;
+    for (const [j, p] of fresh.entries()) {
+      const i = earlier.length + j;
+      const at = Date.parse(p.at);
+      const near: { q: Post; score: number }[] = [];
+      for (let k = 0; k < i; k++) {
+        const q = all[k];
+        if (!q || q.dup_of) continue;
+        const gap = at - Date.parse(q.at);
+        if (gap < 0 || gap > SAME_NEWS_MS) continue;
+        const score = cos(unit[i] ?? [], unit[k] ?? []);
+        if (score >= NEAR_NEWS) near.push({ q, score });
+      }
+      // Closeness alone also joins two different statements by one speaker; Clef confirms.
+      for (const { q } of near.sort((a, b) => b.score - a.score)) {
+        if (await this.sameNews(q, p)) {
+          p.dup_of = q.id;
+          n++;
+          break;
+        }
+      }
+    }
+    return n;
+  }
+
+  /** Clef-flash: whether two posts report the same news, not just the same topic or speaker. */
+  private async sameNews(a: Post, b: Post): Promise<boolean> {
+    const r = (await this.ai?.run(DECISION_MODEL, {
+      model: 'clef-flash',
+      state: `Post A: ${a.text.slice(0, 2000)}\nPost B: ${b.text.slice(0, 2000)}`,
+      questions: {
+        same: {
+          type: 'choice',
+          instructions:
+            'Do posts A and B report the same piece of news (the same statement or event), not just the same topic or speaker?',
+          criteria: { yes: 'Same news', no: 'Different news' },
+        },
+      },
+    })) as { answers?: { same?: { probabilities?: { yes?: number } } } };
+    return (r?.answers?.same?.probabilities?.yes ?? 0) >= SAME_NEWS_P;
   }
 
   private async symbols(batch: Post[]) {

@@ -26,6 +26,7 @@ import {
   ChevronRightIcon,
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
+  CornerDownRightIcon,
   Grid3x3Icon,
   PencilIcon,
   PlusIcon,
@@ -210,7 +211,7 @@ function DetailsBody<T extends RowData>({
   const parts = domain.parts?.rows(row) ?? [];
   const by = domain.fields.find((f) => f.key === domain.parts?.by);
   const sections: NonNullable<ViewDomain<T>['details']> = [
-    ...(parts.length > 1 && by && domain.parts
+    ...(parts.length > (domain.parts?.others ? 0 : 1) && by && domain.parts
       ? [
           {
             id: '_parts',
@@ -826,6 +827,7 @@ function RowsTable<T extends RowData>({
       </TableCell>
     );
 
+  const [openParts, setOpenParts] = useState<Set<string>>(new Set());
   const hasTotal = shown.some((f) => f.aggregate || f.rollFormula || f.share?.within === 'total');
   // A group row's label spans the leading columns that roll nothing up (Bikram, 2026-10-09).
   const rolls = (f: ViewField<T>) => !!f.aggregate || !!f.rollFormula || !!f.share;
@@ -851,36 +853,106 @@ function RowsTable<T extends RowData>({
       </TableCell>
     ));
 
-  // The whole row opens the details drawer (Bikram, 2026-10-09).
-  const dataRow = (r: (typeof sorted)[number]) => (
+  // A row's chevron opens one level under it, closed by default: the domain's `expand`, else its
+  // parts (Bikram, 2026-10-12).
+  const partsOf = (row: T) => domain.expand?.(row).rows ?? domain.parts?.rows(row) ?? [];
+  const opens = (row: T) => partsOf(row).length > (domain.parts?.others ? 0 : 1);
+  const nests = sorted.some((r) => opens(r.original));
+  const partRow = (p: T, name?: (row: T) => string) => (
     <TableRow
-      key={domain.rowKey(r.original)}
-      data-row={domain.rowKey(r.original)}
-      className={cn('group/row', onDetails && 'cursor-pointer')}
-      tabIndex={onDetails ? 0 : undefined}
-      onClick={onDetails ? () => onDetails(r.original) : undefined}
-      onKeyDown={
-        onDetails
-          ? (e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                onDetails(r.original);
-              }
-            }
-          : undefined
-      }
+      key={`part:${keyOf(p)}`}
+      className={cn(
+        'bg-muted/30 text-muted-foreground hover:bg-muted/40',
+        onDetails && 'cursor-pointer',
+      )}
+      onClick={onDetails ? () => onDetails(p) : undefined}
     >
-      {selectCell(keyOf(r.original), keyOf(r.original))}
-      {r.getAllCells().map((c, i) => (
-        <TableCell
-          key={c.id}
-          className={cn(alignOf(shown[i]?.format ?? 'text'), groupBy && i === 0 && 'pl-8')}
-        >
-          {flexRender(c.column.columnDef.cell, c.getContext())}
+      {selection && <TableCell />}
+      {shown.map((f, i) => (
+        <TableCell key={f.key} className={cn(alignOf(f.format), i === 0 && 'pl-12')}>
+          {i === 0 ? (
+            <span className="flex items-center gap-2">
+              <CornerDownRightIcon className="size-3.5 shrink-0" />
+              {name?.(p)}
+            </span>
+          ) : (
+            cellOf(
+              f,
+              p,
+              chips.some((c) => c.key === f.key),
+            )
+          )}
         </TableCell>
       ))}
     </TableRow>
+  );
+  // The whole row opens the details drawer (Bikram, 2026-10-09).
+  const dataRow = (r: (typeof sorted)[number]) => (
+    <Fragment key={domain.rowKey(r.original)}>
+      <TableRow
+        key={domain.rowKey(r.original)}
+        data-row={domain.rowKey(r.original)}
+        className={cn('group/row', onDetails && 'cursor-pointer')}
+        tabIndex={onDetails ? 0 : undefined}
+        onClick={onDetails ? () => onDetails(r.original) : undefined}
+        onKeyDown={
+          onDetails
+            ? (e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onDetails(r.original);
+                }
+              }
+            : undefined
+        }
+      >
+        {selectCell(keyOf(r.original), keyOf(r.original))}
+        {r.getAllCells().map((c, i) => (
+          <TableCell
+            key={c.id}
+            className={cn(alignOf(shown[i]?.format ?? 'text'), groupBy && i === 0 && 'pl-8')}
+          >
+            {i === 0 && nests ? (
+              <span className="flex items-center gap-1">
+                {opens(r.original) ? (
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    className="-ml-1"
+                    aria-expanded={openParts.has(keyOf(r.original))}
+                    aria-label={`${openParts.has(keyOf(r.original)) ? 'Hide' : 'Show'} ${domain.expand?.(r.original).label ?? domain.parts?.label ?? 'parts'}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenParts((o) => {
+                        const n = new Set(o);
+                        const k = keyOf(r.original);
+                        n.has(k) ? n.delete(k) : n.add(k);
+                        return n;
+                      });
+                    }}
+                  >
+                    <ChevronRightIcon
+                      className={cn(
+                        'transition-transform',
+                        openParts.has(keyOf(r.original)) && 'rotate-90',
+                      )}
+                    />
+                  </Button>
+                ) : (
+                  <span className="-ml-1 size-6 shrink-0" />
+                )}
+                {flexRender(c.column.columnDef.cell, c.getContext())}
+              </span>
+            ) : (
+              flexRender(c.column.columnDef.cell, c.getContext())
+            )}
+          </TableCell>
+        ))}
+      </TableRow>
+      {openParts.has(keyOf(r.original)) &&
+        partsOf(r.original).map((p) => partRow(p, domain.expand?.(r.original).name))}
+    </Fragment>
   );
 
   return (

@@ -1,16 +1,17 @@
 /**
- * Sector and Basket (Bikram, 2026-10-09): the two tags on holdings (D1 `symbol_sectors` and
- * `position_baskets`, one sealed document per person each, migration 0027). A sector belongs to a ticker: every holding of it, and every
- * option on it, shows it. A basket belongs to a holding: one account's position in a ticker or OCC
- * contract, or every account's at once. Both are holdings fields that views show, group and filter
- * by. Every read and write is scoped to the caller (`owner`).
+ * Sector and Basket (Bikram, 2026-10-09): two holdings fields that views show, group and filter by.
+ * A sector belongs to a ticker (D1 `symbol_sectors`, one sealed document per person): every holding
+ * of it, and every option on it, shows it. A basket is an Autopilot basket (2026-10-12): a holding
+ * shows the basket whose sleeve in that account holds it (`autopilot.ts`). Every read and write is
+ * scoped to the caller (`owner`).
  */
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { AccessIdentity } from '../../access';
 import type { D1Like } from '../../d1';
 import { OwnerDoc, type Vault } from '../../vault';
-import { portfolioIdSchema, portfolioOwner } from './portfolio';
+import type { Autopilot } from './autopilot';
+import { portfolioOwner } from './portfolio';
 
 const MAX_SYMBOLS = 500;
 
@@ -29,44 +30,28 @@ export const sectorWriteShape = {
     .describe('Ticker → sector; null clears it. Example: {"TQQQ": "Technology", "GLDM": "Gold"}.'),
 };
 
-export const basketWriteShape = {
-  basket: tagValue
-    .nullable()
-    .describe('The basket name, e.g. "9-sig"; null takes the symbols out of their basket.'),
-  symbols: z
-    .array(symbolSchema)
-    .min(1)
-    .max(MAX_SYMBOLS)
-    .describe('Tickers, or OCC symbols for options, e.g. ["TQQQ", "GLDM"].'),
-  portfolio_id: portfolioIdSchema
-    .optional()
-    .describe(
-      'Only this account. Leave it out to set every account that holds the symbols (and any that ' +
-        'buys them later); that also clears one-account baskets on them.',
-    ),
-};
-const basketWriteSchema = z.object(basketWriteShape);
-export type BasketWrite = z.infer<typeof basketWriteSchema>;
-
 export interface HoldingTagSet {
   /** Ticker → sector. */
   sectors: Record<string, string>;
-  /** Baskets by symbol; `portfolio_id` null means every account. */
+  /** The basket each account's holding sits in (its sleeve). */
   baskets: { symbol: string; portfolio_id: string | null; basket: string }[];
 }
 
 export class HoldingTags {
   private readonly sectors: OwnerDoc<HoldingTagSet['sectors']>;
-  private readonly baskets: OwnerDoc<HoldingTagSet['baskets']>;
-  constructor(db: D1Like, vault: Vault) {
+  constructor(
+    db: D1Like,
+    vault: Vault,
+    /** Baskets live in Autopilot (sleeves); without it holdings show none. */
+    private readonly autopilot?: Autopilot,
+  ) {
     this.sectors = new OwnerDoc(db, vault, 'symbol_sectors', () => ({}));
-    this.baskets = new OwnerDoc(db, vault, 'position_baskets', () => []);
   }
 
   async list(owner: string): Promise<HoldingTagSet> {
     const [sectors, baskets] = await Promise.all([
       this.sectors.read(owner),
-      this.baskets.read(owner),
+      this.autopilot ? this.autopilot.tags(owner) : Promise.resolve([]),
     ]);
     return { sectors, baskets };
   }
@@ -79,31 +64,6 @@ export class HoldingTags {
         else next[symbol] = sector;
       }
       return Object.fromEntries(Object.entries(next).sort(([a], [b]) => (a < b ? -1 : 1)));
-    });
-    return this.list(owner);
-  }
-
-  async setBasket(owner: string, w: BasketWrite) {
-    const one = w.portfolio_id ?? null;
-    const symbols = new Set(w.symbols);
-    await this.baskets.update(owner, (have) => {
-      // Every account: its value replaces each account's own; one account: just that row.
-      const kept = have.filter(
-        (b) => !symbols.has(b.symbol) || (one !== null && b.portfolio_id !== one),
-      );
-      const added =
-        w.basket === null
-          ? []
-          : w.symbols.map((symbol) => ({ symbol, portfolio_id: one, basket: w.basket as string }));
-      return [...kept, ...added].sort((a, b) =>
-        a.symbol !== b.symbol
-          ? a.symbol < b.symbol
-            ? -1
-            : 1
-          : (a.portfolio_id ?? '') < (b.portfolio_id ?? '')
-            ? -1
-            : 1,
-      );
     });
     return this.list(owner);
   }
@@ -131,7 +91,7 @@ const invalid = (issues: z.ZodIssue[]) => ({
 
 /**
  * REST under `/api/tags` (signed in): the caller's sectors and baskets. The holdings table edits
- * them in place (Bikram, 2026-10-09); agents use MCP `sector_write` and `basket_write`.
+ * sectors here and baskets through `/api/baskets/assign`; agents use MCP `sector_write` and basket_*.
  */
 export function tagRoutes(tags: HoldingTags) {
   const r = new Hono<Env>();
@@ -142,12 +102,6 @@ export function tagRoutes(tags: HoldingTags) {
     const body = z.object(sectorWriteShape).safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json(invalid(body.error.issues), 400);
     return c.json(await tags.setSectors(owner(c), body.data.sectors));
-  });
-  /** `{basket: "9-sig", symbols: ["TQQQ"], portfolio_id?}`; basket null clears. */
-  r.post('/baskets', async (c) => {
-    const body = basketWriteSchema.safeParse(await c.req.json().catch(() => null));
-    if (!body.success) return c.json(invalid(body.error.issues), 400);
-    return c.json(await tags.setBasket(owner(c), body.data));
   });
   return r;
 }

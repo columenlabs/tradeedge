@@ -24,8 +24,12 @@ import { Vault } from '../../vault';
 import { customViewRoutes } from '../../views/custom-views';
 import { CustomViews } from '../../views/store';
 import { apiRoutes } from './api';
+import { Autopilot, autopilotRoutes, priceFeed } from './autopilot';
+import { Earnings, earningsRoutes } from './earnings';
 import { Integrations, type SendNotice, integrationRoutes } from './integrations';
 import { Logs, logRequests, logRoutes } from './logs';
+import { builtInHistory } from './market-history';
+import { PerformanceService, performanceRoutes } from './performance';
 import { Portfolios, portfolioRoutes } from './portfolio';
 import { type PostArchive, Posts, postRoutes } from './posts';
 import { Schedules, scheduleRoutes } from './schedules';
@@ -72,6 +76,8 @@ export interface TradeedgeDeps {
   watchlist?: Watchlist;
   /** The person's sectors and baskets (D1). Omitted → `/api/tags` not mounted, no MCP tools. */
   tags?: HoldingTags;
+  /** Autopilot baskets, sleeves and orders (D1). Omitted → no `/api/baskets`, `/api/orders`, basket_* or order_* tools. */
+  autopilot?: Autopilot;
   /** Agent feedback (GitHub issues). Omitted → no feedback_* tools and no GitHub hook. */
   feedback?: Feedback;
   /** Saved CustomViewPage views (D1). Omitted → no `/api/custom-views` and no custom_view_* tools. */
@@ -82,6 +88,8 @@ export interface TradeedgeDeps {
   posts?: Posts;
   /** Each person's schedules (D1). Omitted → no `/api/schedules`, and nothing runs on the cron. */
   schedules?: Schedules;
+  /** Earnings calendar and 8-K one-liners (Robinhood sign-in + SEC). Omitted → no `/api/earnings`. */
+  earnings?: Earnings;
 }
 
 /**
@@ -124,6 +132,7 @@ export function tradeedgeStores(
     market,
     logs,
     mail,
+    history,
     alpaca: {
       optionsFeed: cfg.live?.optionsFeed,
       stockFeed: cfg.live?.stockFeed,
@@ -131,33 +140,52 @@ export function tradeedgeStores(
       tradingUrl: cfg.live?.tradingUrl,
     },
   });
+  const autopilot = new Autopilot(db, vault, portfolios, (owner) => integrations.tradeable(owner));
   const posts = new Posts(db, vault, integrations, new PostTagger(x.ai), {
     archive: x.archive,
     logs,
   });
+  const watchlist = new Watchlist(db, vault);
+  const earnings = new Earnings(integrations, portfolios, watchlist, posts, { ai: x.ai, logs });
   const schedules = new Schedules(
     db,
     vault,
     {
       x_market: (owner, why) => posts.check(owner, why),
       x_outside: (owner, why) => posts.check(owner, why),
+      news_market: (owner, why) => posts.checkNews(owner, why),
+      news_outside: (owner, why) => posts.checkNews(owner, why),
       posts_prune: (owner) => posts.prune(owner),
+      earnings_calendar: (owner, why) => earnings.refresh(owner, why),
+      earnings: (owner, why) => earnings.check(owner, why),
     },
     logs,
+    async (owner) => {
+      const [x, alpaca, robinhood] = await Promise.all([
+        integrations.xDoc(owner),
+        integrations.alpacaDoc(owner),
+        integrations.earningsDoc(owner),
+      ]);
+      return { x: !!x, news: !!alpaca, earnings: !!robinhood };
+    },
   );
   integrations.onXChange = (owner, connected) => schedules.setX(owner, connected);
+  integrations.onAlpacaChange = (owner, connected) => schedules.setNews(owner, connected);
+  integrations.onRobinhoodChange = (owner, connected) => schedules.setEarnings(owner, connected);
   return {
     logs,
     vault,
     strategies,
     portfolios,
     integrations,
+    autopilot,
     posts,
     schedules,
+    earnings,
     trades: new Trades(db, vault),
     screeners: new Screeners(db, strategies, vault),
-    watchlist: new Watchlist(db, vault),
-    tags: new HoldingTags(db, vault),
+    watchlist,
+    tags: new HoldingTags(db, vault, autopilot),
     customViews: new CustomViews(db, vault),
   };
 }
@@ -366,13 +394,34 @@ export function tradeedgeRoutes(
   if (deps.logs) app.route('/api/logs', logRoutes(deps.logs));
   if (deps.posts) app.route('/api/posts', postRoutes(deps.posts));
   if (deps.schedules) app.route('/api/schedules', scheduleRoutes(deps.schedules));
-  if (deps.portfolios) app.route('/api/portfolios', portfolioRoutes(deps.portfolios));
+  if (deps.earnings) app.route('/api/earnings', earningsRoutes(deps.earnings));
+  if (deps.portfolios) {
+    // Performance (Bikram, 2026-10-12): closes from the suite's ClickHouse, or the person's DataEdge key.
+    const history = builtInHistory(deps.history);
+    const perf = new PerformanceService(deps.portfolios, async (owner) =>
+      integrations ? integrations.history(owner) : history,
+    );
+    app.route('/api/portfolios/performance', performanceRoutes(perf));
+    app.route('/api/portfolios', portfolioRoutes(deps.portfolios));
+  }
   if (integrations) app.route('/api/integrations', integrationRoutes(integrations));
   if (deps.trades) app.route('/api/trades', tradeRoutes(deps.trades));
   if (deps.strategies) app.route('/api/strategies', strategyRoutes(deps.strategies));
   if (deps.screeners) app.route('/api/screeners', screenerRoutes(deps.screeners));
   if (deps.watchlist) app.route('/api/watchlist', watchlistRoutes(deps.watchlist));
   if (deps.tags) app.route('/api/tags', tagRoutes(deps.tags));
+  // Autopilot (Bikram, 2026-10-12): prices come from the caller's own feed (their Alpaca key when set).
+  const priceFor = (owner: string) =>
+    priceFeed(async (symbols) =>
+      (integrations ? await integrations.marketFor(owner) : market).quotes(symbols, false, (t) =>
+        ctx.history.fundNavs(t),
+      ),
+    );
+  if (deps.autopilot) {
+    const ap = autopilotRoutes(deps.autopilot, priceFor);
+    app.route('/api/baskets', ap.baskets);
+    app.route('/api/orders', ap.orders);
+  }
   if (deps.customViews) app.route('/api/custom-views', customViewRoutes(deps.customViews, 'trade'));
   // Symbol fields (Bikram, 2026-10-12): the person's Robinhood sign-in and DataEdge market data.
   const symbols = new SymbolFactsService(ctx.history, integrations);
@@ -430,6 +479,7 @@ export function tradeedgeRoutes(
         trades: deps.trades,
         watchlist: deps.watchlist,
         tags: deps.tags,
+        autopilot: deps.autopilot ? { store: deps.autopilot, priceFor } : undefined,
         feedback: deps.feedback,
         customViews: deps.customViews,
         symbols,

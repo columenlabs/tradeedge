@@ -1,6 +1,9 @@
+import type { NewsArticle } from '@edgedesk/providers';
 /**
- * Posts (Bikram, 2026-10-12): what the accounts a person tracks on X post, tagged with symbols, a
- * macro theme and sentiment (x.ts), for the app's Posts views, REST `/api/posts` and MCP `post_list`.
+ * Posts (Bikram, 2026-10-12): what the accounts a person tracks on X post, and the news their own
+ * Alpaca key reads (Benzinga, every article), tagged with symbols, a macro theme and sentiment
+ * (x.ts), for the app's Posts views, REST `/api/posts` and MCP `post_list`. Each post names its
+ * `source` (X or Alpaca).
  *
  * Where posts live depends on the deployment (Bikram, 2026-10-12): with DataEdge (the EdgeDesk
  * suite) they go to its `x_posts` dataset in ClickHouse, kept for good and shared, since posts are
@@ -9,7 +12,7 @@
  * removed by the Prune old posts schedule.
  *
  * A check reads only posts newer than the last one: one twitterapi.io search per 20 tracked
- * accounts, on the person's own key.
+ * accounts, on the person's own key; a news check, one Alpaca news read (more pages when busy).
  */
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
@@ -19,7 +22,15 @@ import type { Vault } from '../../vault';
 import { IntegrationNotConnected, type Integrations } from './integrations';
 import type { Logs } from './logs';
 import { portfolioOwner } from './portfolio';
-import { type Post, type PostTagger, THEMES, type Theme, TwitterApiClient } from './x';
+import {
+  POST_SOURCES,
+  type Post,
+  type PostSource,
+  type PostTagger,
+  THEMES,
+  type Theme,
+  TwitterApiClient,
+} from './x';
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -27,22 +38,54 @@ const KEEP_MS = 30 * 86_400_000;
 /** A person's first check reads this far back. */
 const FIRST_LOOK_S = 3600;
 
-/** DataEdge's `x_posts` dataset, as the suite hands it in (desks/dataedge/x-posts.ts). */
+/** DataEdge's `x_posts` and `alpaca_news` datasets, as the suite hands them in (desks/dataedge/x-posts.ts). */
 export interface PostArchive {
   push(posts: Post[]): Promise<void>;
-  /** Posts by `handles`, newest first. */
-  list(q: { handles: string[]; from: string; limit: number }): Promise<Post[]>;
+  /**
+   * Posts by `handles`, every news article when `news`, and earnings posts naming `tickers`, newest
+   * first.
+   */
+  list(q: {
+    handles: string[];
+    news: boolean;
+    tickers: string[];
+    from: string;
+    limit: number;
+  }): Promise<Post[]>;
+}
+
+/** An Alpaca news article as a post; tickers come with it. */
+function newsPost(a: NewsArticle): Post {
+  const source = a.source.trim().toLowerCase() || 'news';
+  return {
+    id: `alpaca:${a.id}`,
+    source: 'alpaca',
+    url: a.url,
+    at: new Date(a.createdAt).toISOString(),
+    handle: source,
+    name: a.author || source,
+    text: a.headline || a.summary,
+    symbols: [...new Set(a.symbols.map((s) => s.toUpperCase()))],
+    theme: null,
+    theme_conf: null,
+    sentiment: null,
+    sentiment_conf: null,
+  };
 }
 
 export interface PostQuery {
   /** Only posts naming this ticker. */
   symbol?: string;
-  /** Only this account. */
+  /** Only this account (or news publisher). */
   handle?: string;
+  /** Only posts from this source. */
+  source?: PostSource;
   theme?: Theme;
   /** Posts from the last this many hours (default 24, at most 720). */
   hours?: number;
   limit?: number;
+  /** Keep repeats as their own rows (the check's own read); by default each folds into its first post. */
+  raw?: boolean;
 }
 
 export class Posts {
@@ -76,9 +119,10 @@ export class Posts {
     try {
       const seen = new Set(doc.since_ids ?? []);
       const read = await client.postsSince(doc.handles, since);
-      const fresh = read.filter((p) => !seen.has(p.id) && doc.handles.includes(p.handle));
-      const notes = await this.tagger.tag(fresh);
-      await this.save(owner, fresh);
+      const fresh = read
+        .filter((p) => !seen.has(p.id) && doc.handles.includes(p.handle))
+        .map((p) => ({ ...p, source: 'x' as const }));
+      const { repeats, notes } = await this.ingest(owner, fresh);
       const newest = fresh.length
         ? Math.floor(Date.parse(fresh[fresh.length - 1]?.at ?? at) / 1000)
         : since;
@@ -90,8 +134,7 @@ export class Posts {
         { at, ok: true, posts: fresh.length, error: null },
         { since: newest, since_ids: newest === since ? [...seen, ...ids] : ids },
       );
-      const report = `${fresh.length} new post${fresh.length === 1 ? '' : 's'}`;
-      const detail = notes.length ? `${report} · ${notes.join(' · ')}` : report;
+      const detail = report(fresh.length, repeats, notes);
       await this.opts.logs?.note(owner, {
         category: 'x',
         what: what(read.length),
@@ -105,6 +148,88 @@ export class Posts {
       await this.integrations.xChecked(owner, { at, ok: false, posts: 0, error });
       await this.opts.logs?.note(owner, {
         category: 'x',
+        what: what(0),
+        ok: false,
+        ms: performance.now() - t0,
+        detail: error,
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Folds repeats of recent news (any source), tags the rest, copies tags onto repeats and stores
+   * them all.
+   */
+  private async ingest(owner: string, fresh: Post[]) {
+    const notes: string[] = [];
+    let repeats = 0;
+    const recent = fresh.length ? await this.list(owner, { hours: 2, raw: true }) : [];
+    try {
+      repeats = await this.tagger.markRepeats(fresh, recent);
+    } catch (err) {
+      notes.push(`Repeats not checked: ${(err as Error).message.slice(0, 120)}`);
+    }
+    // A repeat is not tagged again: it takes the tags of the post it repeats.
+    notes.push(...(await this.tagger.tag(fresh.filter((p) => !p.dup_of))));
+    const byId = new Map(fresh.map((p) => [p.id, p]));
+    for (const p of fresh) {
+      const src = p.dup_of ? (byId.get(p.dup_of) ?? recent.find((r) => r.id === p.dup_of)) : null;
+      if (src) {
+        if ((p.source ?? 'x') === 'x') p.symbols = src.symbols;
+        p.theme = src.theme;
+        p.theme_conf = src.theme_conf;
+        p.sentiment = src.sentiment;
+        p.sentiment_conf = src.sentiment_conf;
+      }
+    }
+    await this.save(owner, fresh);
+    return { repeats, notes };
+  }
+
+  /** Stores posts made elsewhere (earnings.ts): repeats folded, tagged, saved. */
+  async add(owner: string, posts: Post[]) {
+    return this.ingest(owner, posts);
+  }
+
+  /**
+   * Reads new news articles with the person's own Alpaca key, tags and stores them, and logs it
+   * (category News). `why` names what started it. Returns a one-line report.
+   */
+  async checkNews(owner: string, why: string): Promise<string> {
+    const doc = await this.integrations.alpacaDoc(owner);
+    if (!doc)
+      throw new IntegrationNotConnected('Alpaca is not connected: add your key in Integrations.');
+    const at = new Date().toISOString();
+    const t0 = performance.now();
+    const since = doc.news_since ?? new Date(Date.now() - FIRST_LOOK_S * 1000).toISOString();
+    const what = (n: number) => `Check news (${why})${n ? `: ${n} articles read` : ''}`;
+    try {
+      const seen = new Set(doc.news_ids ?? []);
+      const read = await this.integrations.alpacaClient(doc).getNews({ start: since });
+      const fresh = read.map(newsPost).filter((p) => !seen.has(p.id));
+      const { repeats, notes } = await this.ingest(owner, fresh);
+      const newest = fresh.length ? (fresh[fresh.length - 1]?.at ?? since) : since;
+      const ids = fresh.filter((p) => p.at === newest).map((p) => p.id);
+      await this.integrations.newsChecked(
+        owner,
+        { at, ok: true, posts: fresh.length, error: null },
+        { news_since: newest, news_ids: newest === since ? [...seen, ...ids] : ids },
+      );
+      const detail = report(fresh.length, repeats, notes);
+      await this.opts.logs?.note(owner, {
+        category: 'news',
+        what: what(read.length),
+        ok: true,
+        ms: performance.now() - t0,
+        detail,
+      });
+      return detail;
+    } catch (err) {
+      const error = (err as Error).message.slice(0, 300);
+      await this.integrations.newsChecked(owner, { at, ok: false, posts: 0, error });
+      await this.opts.logs?.note(owner, {
+        category: 'news',
         what: what(0),
         ok: false,
         ms: performance.now() - t0,
@@ -147,15 +272,31 @@ export class Posts {
     const hours = Math.min(q.hours ?? 24, 720);
     const limit = Math.min(q.limit ?? 1000, 2000);
     const from = Date.now() - hours * 3_600_000;
-    const doc = await this.integrations.xDoc(owner);
     let rows: Post[];
     if (this.opts.archive) {
-      const handles = q.handle ? [q.handle.toLowerCase()] : (doc?.handles ?? []);
-      if (!handles.length) return [];
+      const [doc, alpaca, earnings] = await Promise.all([
+        this.integrations.xDoc(owner),
+        this.integrations.alpacaDoc(owner),
+        this.integrations.earningsDoc(owner),
+      ]);
+      const only = (s: PostSource) => !q.source || q.source === s;
+      const handles = !only('x') ? [] : q.handle ? [q.handle.toLowerCase()] : (doc?.handles ?? []);
+      const news = !!alpaca && only('alpaca');
+      const tickers = only('sec')
+        ? [
+            ...new Set([
+              ...(earnings?.calendar ?? []).map((e) => e.symbol),
+              ...(earnings?.reported ?? []).map((r) => r.symbol),
+            ]),
+          ]
+        : [];
+      if (!handles.length && !news && !tickers.length) return [];
       rows = await this.opts.archive.list({
         handles,
+        news,
+        tickers,
         from: new Date(from).toISOString(),
-        limit: q.symbol || q.theme ? 2000 : limit,
+        limit: q.symbol || q.theme || q.handle ? 2000 : limit,
       });
     } else {
       const v = await this.vault.for(owner);
@@ -166,7 +307,19 @@ export class Posts {
         .bind(v.owner, from, 2000)
         .all<{ id: string; data: string }>();
       rows = await Promise.all(results.map((r) => v.open<Post>(`posts:${r.id}`, r.data)));
-      if (q.handle) rows = rows.filter((p) => p.handle === q.handle?.toLowerCase());
+    }
+    rows = rows.map((p) => (p.source ? p : { ...p, source: 'x' }));
+    if (q.handle) rows = rows.filter((p) => p.handle === q.handle?.toLowerCase());
+    if (q.source) rows = rows.filter((p) => p.source === q.source);
+    if (!q.raw) {
+      // The same news posted again reads as one post: the first, with the others in `repeats`.
+      const ids = new Map(rows.map((p) => [p.id, p]));
+      rows = rows.filter((p) => {
+        const first = p.dup_of ? ids.get(p.dup_of) : undefined;
+        if (!first) return true;
+        first.repeats = [p, ...(first.repeats ?? [])];
+        return false;
+      });
     }
     const symbol = q.symbol?.toUpperCase();
     return rows
@@ -175,9 +328,26 @@ export class Posts {
   }
 }
 
+const report = (n: number, repeats: number, notes: string[]) => {
+  const r = `${n} new post${n === 1 ? '' : 's'}${repeats ? `, ${repeats} repeat${repeats === 1 ? '' : 's'}` : ''}`;
+  return notes.length ? `${r} · ${notes.join(' · ')}` : r;
+};
+
 export const postListShape = {
   symbol: z.string().trim().min(1).max(12).optional().describe('Only posts naming this ticker.'),
-  handle: z.string().trim().min(1).max(16).optional().describe('Only this X account (no @).'),
+  handle: z
+    .string()
+    .trim()
+    .min(1)
+    .max(32)
+    .optional()
+    .describe('Only this X account (no @) or news publisher (benzinga).'),
+  source: z
+    .enum(Object.keys(POST_SOURCES) as [PostSource, ...PostSource[]])
+    .optional()
+    .describe(
+      'Only posts from this source: x (tracked X accounts), alpaca (news) or sec (earnings).',
+    ),
   theme: z
     .enum(Object.keys(THEMES) as [Theme, ...Theme[]])
     .optional()
@@ -199,6 +369,7 @@ export function postRoutes(posts: Posts) {
   const query = z.object({
     symbol: postListShape.symbol,
     handle: postListShape.handle,
+    source: postListShape.source,
     theme: postListShape.theme,
     hours: z.coerce.number().int().min(1).max(720).optional(),
     limit: z.coerce.number().int().min(1).max(2000).optional(),

@@ -70,6 +70,12 @@ const portfolio = createRoute({
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'AllAccountsPage'),
 });
 
+const portfolioPerformance = createRoute({
+  getParentRoute: () => root,
+  path: '/portfolio/performance',
+  component: lazyRouteComponent(() => import('@/routes/performance'), 'PerformancePage'),
+});
+
 const portfolioTransactions = createRoute({
   getParentRoute: () => root,
   path: '/portfolio/transactions',
@@ -110,6 +116,52 @@ const portfolioView = createRoute({
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'PortfolioViewPage'),
 });
 
+// Autopilot (Bikram, 2026-10-12): baskets with sleeves, and the orders they propose.
+const autopilot = createRoute({
+  getParentRoute: () => root,
+  path: '/autopilot',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'AutopilotPage'),
+});
+
+const basketNew = createRoute({
+  getParentRoute: () => root,
+  path: '/baskets/new',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'NewBasketPage'),
+});
+
+const basket = createRoute({
+  getParentRoute: () => root,
+  path: '/baskets/$id',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'BasketPage'),
+});
+
+const basketEdit = createRoute({
+  getParentRoute: () => root,
+  path: '/baskets/$id/edit',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'EditBasketPage'),
+});
+
+const ordersQueue = createRoute({
+  getParentRoute: () => root,
+  path: '/orders/queue',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'QueuePage'),
+});
+
+const ordersToPlace = createRoute({
+  getParentRoute: () => root,
+  path: '/orders/to-place',
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'ToPlacePage'),
+});
+
+const ordersHistory = createRoute({
+  getParentRoute: () => root,
+  path: '/orders/history',
+  // `?show=all` lists every order; else the last 30 days' fills.
+  validateSearch: (s: Record<string, unknown>): { show?: 'all' } =>
+    s.show === 'all' ? { show: 'all' } : {},
+  component: lazyRouteComponent(() => import('@/routes/autopilot'), 'HistoryPage'),
+});
+
 const logs = createRoute({
   getParentRoute: () => root,
   path: '/logs',
@@ -148,12 +200,20 @@ const routeTree = root.addChildren([
   screenerSymbol,
   screener,
   portfolio,
+  portfolioPerformance,
   portfolioTransactions,
   portfolioTaxLots,
   portfolioAccounts,
   portfolioView,
   symbols,
   symbolView,
+  autopilot,
+  basketNew,
+  basket,
+  basketEdit,
+  ordersQueue,
+  ordersToPlace,
+  ordersHistory,
   logs,
   logView,
   postsView,
