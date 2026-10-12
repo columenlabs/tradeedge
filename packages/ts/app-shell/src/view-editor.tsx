@@ -1,9 +1,9 @@
-// The Edit view dialog (Bikram, 2026-10-09): shaped like Settings. Sections on the left (a section
-// picker on phones), the view's name and Close pinned at the top, Cancel and Save pinned at the
-// bottom. Layout sets how the view opens; Fields is one list of every field (show, chip placement,
-// group, filter, order by dragging, formulas edited in place); Summary the tiles above the table;
-// More the view id for agents, Duplicate and Delete. Everything here is the view's config, which
-// agents write the same way through MCP custom_view_write.
+// The Edit view dialog (Bikram, 2026-10-12, mock 2b): two panes. Left, a tree of every field the
+// view's rows reach, grouped by where it comes from (Holding, Symbol by topic, Account, Formulas),
+// ticked to show. Right, what the view does with them: column order (drag), shape, group, filter,
+// sort, header tiles, then the view id, Duplicate and Delete. Name, icon, Cancel and Save sit in
+// the header. On a phone the panes are two tabs, Fields and Layout. Everything here is the view's
+// config, which agents write the same way through MCP custom_view_write.
 import {
   DndContext,
   type DragEndEvent,
@@ -20,7 +20,6 @@ import {
   rectSortingStrategy,
   sortableKeyboardCoordinates,
   useSortable,
-  verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
@@ -30,25 +29,29 @@ import {
   viewAggs,
 } from '@edgedesk/types/views';
 import {
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowUpIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
-  EllipsisIcon,
   FilterIcon,
   GripVerticalIcon,
-  LayoutGridIcon,
-  ListIcon,
   type LucideIcon,
-  PanelsTopLeftIcon,
   PencilIcon,
   PlusIcon,
+  RotateCcwIcon,
   SearchIcon,
+  ShapesIcon,
   SigmaIcon,
+  SmileIcon,
   Trash2Icon,
   XIcon,
 } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { ConfirmDelete } from './confirm';
+import { useIsMobile } from './hooks/use-mobile';
 import { cn } from './lib/utils';
 import { maskAmount, useAmountsHidden } from './shell';
 import { type FilterToken, tokenText } from './token-filter';
@@ -56,22 +59,24 @@ import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Checkbox } from './ui/checkbox';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from './ui/command';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from './ui/dialog';
+import { EmojiPicker, EmojiPickerContent, EmojiPickerSearch } from './ui/emoji-picker';
 import { Input } from './ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from './ui/input-group';
 import { Label } from './ui/label';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Separator } from './ui/separator';
-import {
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuBadge,
-  SidebarMenuButton,
-  SidebarMenuItem,
-} from './ui/sidebar';
 import { Switch } from './ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group';
 import {
   AGG_LABELS,
@@ -81,14 +86,18 @@ import {
   formulaIssues,
   tileIssues,
 } from './view-formulas';
-import { VIEW_ICONS, shapeIcon } from './view-icons';
+import { VIEW_ICONS, lucideIconNames, shapeIcon, viewIcon } from './view-icons';
 import {
+  FORMULAS_GROUP,
   type ViewCellValue,
   type ViewDomain,
   type ViewField,
+  type ViewFieldGroup,
+  canFilter,
   chipsOf,
   computedOf,
   formulasOf,
+  groupOf,
   rollUp,
   tilesOf,
   withFormulas,
@@ -118,8 +127,6 @@ export interface ViewEditDialogProps<T> {
   onDelete?: () => void;
 }
 
-type SectionId = 'layout' | 'fields' | 'summary' | 'editor' | 'more';
-
 const SHAPES = [
   { value: 'table', label: 'Table' },
   { value: 'group', label: 'Group' },
@@ -127,12 +134,15 @@ const SHAPES = [
 ] as const;
 
 const NONE = '_none';
+const CHIP_TEXT = 'text';
+/** The colour of fields with no group colour (formulas, a domain without groups). */
+const PLAIN = 'var(--color-muted-foreground)';
 
-/** A toggled key in a list that, empty, means "all of `all`"; the result keeps `all`'s order. */
-const toggleIn = (list: string[], all: string[], key: string, on: boolean) => {
+/** `list` with `key` on or off; an empty list stands for `all`, kept in `order`. */
+const toggleIn = (list: string[], all: string[], key: string, on: boolean, order = all) => {
   const base = list.length ? list : all;
   const next = on ? [...base, key] : base.filter((k) => k !== key);
-  return all.filter((k) => next.includes(k));
+  return order.filter((k) => next.includes(k));
 };
 
 const sensorsOptions = { activationConstraint: { distance: 4 } };
@@ -152,6 +162,14 @@ const moved = (keys: string[], e: DragEndEvent) => {
   return from < 0 || to < 0 || from === to ? keys : arrayMove(keys, from, to);
 };
 
+/** The tree's groups: the domain's own, else one; then the view's formulas. */
+function groupsOf<T>(domain: ViewDomain<T>): ViewFieldGroup[] {
+  const own = domain.groups?.length ? domain.groups : [{ id: '', label: 'Fields' }];
+  return domain.formulas ? [...own, { id: FORMULAS_GROUP, label: 'Formulas', color: PLAIN }] : own;
+}
+
+type Setter = (c: CustomViewConfig) => void;
+
 export function ViewEditDialog<T>({
   open,
   onOpenChange,
@@ -165,13 +183,16 @@ export function ViewEditDialog<T>({
   onDuplicate,
   onDelete,
 }: ViewEditDialogProps<T>) {
+  const isMobile = useIsMobile();
   const [draft, setDraft] = useState(config);
-  const [section, setSection] = useState<SectionId>('fields');
-  const [query, setQuery] = useState('');
+  const [tab, setTab] = useState<'fields' | 'layout'>('fields');
+  // The formula open in the right pane, in place of the layout.
+  const [editing, setEditing] = useState<string | null>(null);
   const domain = withFormulas(base, draft);
   const widgetKeys = (base.widgets ?? []).map((w) => w.key);
+  const formulas = formulasOf(draft);
   const formulaProblems = formulaIssues(
-    formulasOf(draft),
+    formulas,
     base.fields.map((f) => f.key),
   );
   const tileProblems = tileIssues(
@@ -184,94 +205,91 @@ export function ViewEditDialog<T>({
   const shownKeys = draft.columns.length
     ? draft.columns.filter((k) => allKeys.includes(k))
     : allKeys;
-  const groupable = domain.fields.filter((f) => f.groupable);
-  const offered = (draft.group.fields.length ? draft.group.fields : groupable.map((g) => g.key))
-    .map((k) => groupable.find((g) => g.key === k))
-    .filter((f): f is ViewField<T> => !!f);
 
-  const sections: { id: SectionId; title: string; icon: LucideIcon; description: string }[] = [
-    {
-      id: 'layout',
-      title: 'Layout',
-      icon: PanelsTopLeftIcon,
-      description: 'How the view opens: its shape, grouping, filters and sidebar icon.',
-    },
-    {
-      id: 'fields',
-      title: 'Fields',
-      icon: ListIcon,
-      description:
-        'Which fields show and in what order, where chips sit, and what readers group and filter by.',
-    },
-    ...(base.widgets?.length || base.formulas
-      ? [
-          {
-            id: 'summary' as const,
-            title: 'Summary',
-            icon: LayoutGridIcon,
-            description:
-              'Tiles above the table. Each totals the rows the view shows, after its filters.',
-          },
-        ]
-      : []),
-    ...(editor
-      ? [
-          {
-            id: 'editor' as const,
-            title: editor.title,
-            icon: editor.icon,
-            description: editor.description ?? '',
-          },
-        ]
-      : []),
-    {
-      id: 'more',
-      title: 'More',
-      icon: EllipsisIcon,
-      description: 'The view id for agents, Duplicate and Delete.',
-    },
-  ];
-  // Searching shows the matching fields, wherever it was typed.
-  const shown = query.trim() ? 'fields' : section;
-  const now = sections.find((s) => s.id === shown) ?? (sections[1] as (typeof sections)[number]);
-  const counts: Partial<Record<SectionId, number>> = {
-    fields: shownKeys.length,
-    summary: draft.widgets.length + tilesOf(draft).length,
+  const edit = (key: string | null) => {
+    setEditing(key);
+    if (key) setTab('layout');
   };
-  const go = (id: string) => {
-    setQuery('');
-    setSection(id as SectionId);
+  const addFormula = () => {
+    const n = formulas.length + 1;
+    let key = `formula_${n}`;
+    for (let k = n; allKeys.includes(key); k++) key = `formula_${k + 1}`;
+    setDraft({
+      ...draft,
+      formulas: [
+        ...formulas,
+        { key, label: `Formula ${n}`, expr: '', format: 'number', agg: null },
+      ],
+      columns: [...shownKeys, key],
+    });
+    edit(key);
+  };
+  const save = () => {
+    const keys = new Set(domain.fields.map((f) => f.key));
+    // A removed field leaves its chip and sort too.
+    onSave({
+      ...draft,
+      name: draft.name.trim(),
+      columns: draft.columns.filter((k) => keys.has(k)),
+      chips: chipsOf(draft).filter((c) => keys.has(c.key)),
+      sort: draft.sort && keys.has(draft.sort.key) ? draft.sort : null,
+    });
+    onOpenChange(false);
   };
 
-  const search = (
-    <InputGroup className="bg-background">
-      <InputGroupAddon>
-        <SearchIcon />
-      </InputGroupAddon>
-      <InputGroupInput
-        type="search"
-        className="[&::-webkit-search-cancel-button]:hidden"
-        aria-label="Search fields"
-        placeholder="Search fields"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-      {query && (
-        <InputGroupAddon align="inline-end">
-          <InputGroupButton size="icon-xs" aria-label="Clear search" onClick={() => setQuery('')}>
-            <XIcon />
-          </InputGroupButton>
-        </InputGroupAddon>
-      )}
-    </InputGroup>
+  const tree = (
+    <FieldTree
+      domain={domain}
+      draft={draft}
+      setDraft={setDraft}
+      shownKeys={shownKeys}
+      formulaProblems={formulaProblems}
+      onEditFormula={edit}
+      onAddFormula={formulas.length < MAX_FORMULAS ? addFormula : undefined}
+    />
   );
-
-  const groupedBy =
-    draft.shape === 'pivot'
-      ? 'pivot'
-      : draft.group.default
-        ? `grouped by ${domain.fields.find((f) => f.key === draft.group.default)?.label ?? draft.group.default}`
-        : 'not grouped';
+  const layout = editing ? (
+    <FormulaEditor
+      base={base}
+      draft={draft}
+      setDraft={setDraft}
+      formulaProblems={formulaProblems}
+      editing={editing}
+      setEditing={setEditing}
+    />
+  ) : (
+    <LayoutPane
+      domain={domain}
+      draft={draft}
+      setDraft={setDraft}
+      shownKeys={shownKeys}
+      current={current}
+      rows={rows}
+      tileProblems={tileProblems}
+      onEditFormula={edit}
+      editor={editor}
+      more={
+        <MoreSection
+          name={config.name}
+          viewId={viewId}
+          onDuplicate={
+            onDuplicate &&
+            (() => {
+              onOpenChange(false);
+              onDuplicate();
+            })
+          }
+          onDelete={
+            onDelete &&
+            (() => {
+              onOpenChange(false);
+              onDelete();
+            })
+          }
+        />
+      }
+    />
+  );
 
   return (
     <Dialog
@@ -279,7 +297,8 @@ export function ViewEditDialog<T>({
       onOpenChange={(o) => {
         if (o) {
           setDraft(config);
-          setQuery('');
+          setEditing(null);
+          setTab('fields');
         }
         onOpenChange(o);
       }}
@@ -287,237 +306,444 @@ export function ViewEditDialog<T>({
       <DialogContent
         data-slot="view-editor"
         showCloseButton={false}
-        onEscapeKeyDown={(e) => {
-          if (query) {
-            e.preventDefault();
-            setQuery('');
-          }
-        }}
-        className="flex h-[min(720px,calc(100svh-2rem))] gap-0 overflow-hidden p-0 max-md:h-svh max-md:max-w-full max-md:rounded-none max-md:ring-0 sm:max-w-4xl"
+        className="flex h-[min(780px,calc(100svh-2rem))] flex-col gap-0 overflow-hidden p-0 max-md:h-svh max-md:max-w-full max-md:rounded-none max-md:ring-0 sm:max-w-6xl"
       >
         <DialogDescription className="sr-only">
-          This view's layout, fields, summary tiles and more.
+          This view's fields, columns, shape, grouping, filters, sort and header tiles.
         </DialogDescription>
-        <nav
-          aria-label="Edit view sections"
-          className="hidden w-56 shrink-0 flex-col border-r bg-sidebar py-2 md:flex"
-        >
-          <div className="px-2 pt-1 pb-1">{search}</div>
-          <SidebarGroup className="py-1">
-            <SidebarGroupLabel>This view</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {sections.map((s) => (
-                  <SidebarMenuItem key={s.id}>
-                    <SidebarMenuButton isActive={s.id === shown} onClick={() => go(s.id)}>
-                      <s.icon />
-                      <span>{s.title}</span>
-                    </SidebarMenuButton>
-                    {counts[s.id] !== undefined && (
-                      <SidebarMenuBadge className="num">{counts[s.id]}</SidebarMenuBadge>
-                    )}
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-          <p className="mt-auto border-t px-4 pt-3 pb-1 text-xs text-muted-foreground">
-            Agents change the same settings with{' '}
-            <code className="font-mono">custom_view_write</code>.
-          </p>
-        </nav>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex shrink-0 flex-col gap-2 border-b px-4 py-3 md:px-5">
-            <div className="flex items-start gap-2">
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="text-xs text-muted-foreground">Edit view</span>
-                <DialogTitle className="sr-only">Edit view {draft.name}</DialogTitle>
-                <Input
-                  aria-label="View name"
-                  value={draft.name}
-                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  className="-ml-2 h-8 border-transparent bg-transparent px-2 text-base font-semibold shadow-none hover:border-input dark:bg-transparent"
-                />
-              </div>
-              <DialogClose asChild>
-                <Button variant="ghost" size="icon-sm" aria-label="Close">
-                  <XIcon />
-                </Button>
-              </DialogClose>
-            </div>
-            <div className="flex flex-col gap-2 md:hidden">
-              {search}
-              {!query.trim() && (
-                <Select value={shown} onValueChange={go}>
-                  <SelectTrigger aria-label="Section" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {sections.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
-                        <s.icon />
-                        {s.title}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
-          </header>
-          <section
-            aria-labelledby={`view-editor-${now.id}`}
-            className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 md:p-5"
-          >
-            <div className="flex flex-col gap-0.5">
-              <h3
-                id={`view-editor-${now.id}`}
-                className="flex items-center gap-2 text-base font-semibold"
-              >
-                <now.icon className="size-4 text-muted-foreground" />
-                {query.trim() ? `Fields matching “${query.trim()}”` : now.title}
-              </h3>
-              <p className="text-sm text-muted-foreground">{now.description}</p>
-            </div>
-            <Separator />
-            {shown === 'layout' && (
-              <LayoutSection
-                domain={domain}
-                draft={draft}
-                setDraft={setDraft}
-                offered={offered}
-                current={current}
-              />
-            )}
-            {shown === 'fields' && (
-              <FieldsSection
-                base={base}
-                domain={domain}
-                draft={draft}
-                setDraft={setDraft}
-                shownKeys={shownKeys}
-                query={query.trim().toLowerCase()}
-                formulaProblems={formulaProblems}
-              />
-            )}
-            {shown === 'summary' && (
-              <SummarySection
-                domain={domain}
-                draft={draft}
-                setDraft={setDraft}
-                rows={rows}
-                tileProblems={tileProblems}
-              />
-            )}
-            {shown === 'editor' && editor?.content}
-            {shown === 'more' && (
-              <MoreSection
-                name={config.name}
-                viewId={viewId}
-                onDuplicate={
-                  onDuplicate &&
-                  (() => {
-                    onOpenChange(false);
-                    onDuplicate();
-                  })
-                }
-                onDelete={
-                  onDelete &&
-                  (() => {
-                    onOpenChange(false);
-                    onDelete();
-                  })
-                }
-              />
-            )}
-          </section>
-          <footer className="flex shrink-0 items-center gap-2 border-t px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-5">
-            <p className="num mr-auto hidden min-w-0 truncate text-xs text-muted-foreground md:block">
-              {shownKeys.length} columns · {formulasOf(draft).length} formulas ·{' '}
-              {draft.widgets.length + tilesOf(draft).length} tiles · {groupedBy}
-            </p>
+        <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2 md:px-4">
+          {isMobile && (
             <DialogClose asChild>
-              <Button variant="outline" className="max-md:flex-1">
+              <Button variant="ghost" size="icon-sm" aria-label="Close">
+                <XIcon />
+              </Button>
+            </DialogClose>
+          )}
+          <span className="hidden shrink-0 text-sm font-semibold md:inline">Edit view</span>
+          <DialogTitle className="sr-only">Edit view {draft.name}</DialogTitle>
+          <IconPicker draft={draft} setDraft={setDraft} />
+          <Input
+            aria-label="View name"
+            value={draft.name}
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            className="h-8 min-w-0 flex-1 border-transparent bg-transparent px-2 font-semibold shadow-none hover:border-input md:max-w-sm dark:bg-transparent"
+          />
+          <span className="flex-1 max-md:hidden" />
+          {!isMobile && (
+            <DialogClose asChild>
+              <Button variant="outline" size="sm">
                 Cancel
               </Button>
             </DialogClose>
-            <Button
-              className="max-md:flex-1"
-              disabled={bad}
-              onClick={() => {
-                const keys = new Set(domain.fields.map((f) => f.key));
-                const columns = draft.columns.filter((k) => keys.has(k));
-                // A removed field leaves its chip, grouping and filter too.
-                onSave({
-                  ...draft,
-                  name: draft.name.trim(),
-                  columns,
-                  chips: chipsOf(draft).filter((c) => keys.has(c.key)),
-                });
-                onOpenChange(false);
-              }}
+          )}
+          <Button size="sm" disabled={bad} onClick={save}>
+            <CheckIcon />
+            Save
+          </Button>
+        </header>
+        {isMobile ? (
+          <Tabs
+            value={tab}
+            onValueChange={(v) => setTab(v as typeof tab)}
+            className="min-h-0 flex-1 gap-0 pt-2"
+          >
+            <TabsList className="mx-3 w-[calc(100%-1.5rem)]">
+              <TabsTrigger value="fields">
+                Fields · <span className="num">{shownKeys.length}</span>
+              </TabsTrigger>
+              <TabsTrigger value="layout">Layout</TabsTrigger>
+            </TabsList>
+            <TabsContent value="fields" className="min-h-0 overflow-y-auto px-3 py-2">
+              {tree}
+            </TabsContent>
+            <TabsContent
+              value="layout"
+              className="min-h-0 overflow-y-auto px-3 py-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
             >
-              <CheckIcon />
-              Save view
-            </Button>
-          </footer>
-        </div>
+              {layout}
+            </TabsContent>
+          </Tabs>
+        ) : (
+          <div className="grid min-h-0 flex-1 grid-cols-[340px_minmax(0,1fr)]">
+            <nav
+              aria-label="Fields"
+              className="flex min-h-0 flex-col overflow-y-auto border-r bg-sidebar px-2 py-2"
+            >
+              {tree}
+              <p className="mt-auto px-2 pt-4 text-xs text-muted-foreground">
+                Agents change the same settings with{' '}
+                <code className="font-mono">custom_view_write</code>.
+              </p>
+            </nav>
+            <section aria-label="Layout" className="min-h-0 overflow-y-auto p-4">
+              {layout}
+            </section>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
-type Setter = (c: CustomViewConfig) => void;
+/** The left pane: every field by group and topic, ticked to show it as a column. */
+function FieldTree<T>({
+  domain,
+  draft,
+  setDraft,
+  shownKeys,
+  formulaProblems,
+  onEditFormula,
+  onAddFormula,
+}: {
+  domain: ViewDomain<T>;
+  draft: CustomViewConfig;
+  setDraft: Setter;
+  shownKeys: string[];
+  formulaProblems: (string | null)[];
+  onEditFormula: (key: string) => void;
+  onAddFormula?: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  // Open groups and topics; a group or topic starts open when it has a shown field.
+  const [toggled, setToggled] = useState<Map<string, boolean>>(new Map());
+  const formulas = formulasOf(draft);
+  const match = (f: ViewField<T>) =>
+    !q ||
+    f.label.toLowerCase().includes(q) ||
+    f.key.includes(q) ||
+    !!f.topic?.toLowerCase().includes(q);
+  const setShown = (key: string, on: boolean) =>
+    setDraft({
+      ...draft,
+      columns: on ? [...shownKeys, key] : shownKeys.filter((k) => k !== key),
+    });
+  const isOpen = (id: string, fields: ViewField<T>[]) =>
+    !!q || (toggled.get(id) ?? fields.some((f) => shownKeys.includes(f.key)));
+  const flip = (id: string, now: boolean) => setToggled(new Map(toggled).set(id, !now));
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+  const leaf = (f: ViewField<T>, color: string) => {
+    const fi = formulas.findIndex((x) => x.key === f.key);
+    return (
+      <div
+        key={f.key}
+        className="flex min-h-8 items-center gap-2 rounded-md pr-1 hover:bg-accent/60"
+      >
+        <Label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-1 font-normal">
+          <Checkbox
+            checked={shownKeys.includes(f.key)}
+            onCheckedChange={(v) => setShown(f.key, v === true)}
+            aria-label={`Show ${f.label}`}
+          />
+          <span className="truncate">{f.label}</span>
+          {f.note && (
+            <Badge variant="secondary" className="font-normal">
+              {f.note}
+            </Badge>
+          )}
+          {fi >= 0 && formulaProblems[fi] && (
+            <Badge variant="destructive" className="font-normal">
+              fix
+            </Badge>
+          )}
+        </Label>
+        <code
+          className="ml-auto max-w-[45%] truncate font-mono text-[0.7rem] text-muted-foreground max-md:hidden"
+          title={f.formula ?? f.key}
+        >
+          {fi >= 0 ? formulas[fi]?.expr || 'no expression yet' : f.key}
+        </code>
+        {fi >= 0 && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Edit formula ${f.label}`}
+            onClick={() => onEditFormula(f.key)}
+          >
+            <PencilIcon />
+          </Button>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
+    <div className="flex flex-col gap-1" data-testid="view-fields">
+      <InputGroup className="mb-1 bg-background">
+        <InputGroupAddon>
+          <SearchIcon />
+        </InputGroupAddon>
+        <InputGroupInput
+          type="search"
+          className="[&::-webkit-search-cancel-button]:hidden"
+          aria-label="Search fields"
+          placeholder={`Search ${domain.fields.length} fields`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && (
+          <InputGroupAddon align="inline-end">
+            <InputGroupButton size="icon-xs" aria-label="Clear search" onClick={() => setQuery('')}>
+              <XIcon />
+            </InputGroupButton>
+          </InputGroupAddon>
+        )}
+      </InputGroup>
+      {groupsOf(domain).map((g) => {
+        const all = domain.fields.filter((f) => groupOf(domain, f) === g.id);
+        const fields = all.filter(match);
+        const formulasGroup = g.id === FORMULAS_GROUP;
+        if (q && !fields.length) return null;
+        if (!all.length && !formulasGroup) return null;
+        const color = g.color ?? PLAIN;
+        const open = isOpen(`g:${g.id}`, all) || (formulasGroup && !all.length);
+        const topics = [...new Set(fields.map((f) => f.topic ?? ''))];
+        return (
+          <Collapsible key={g.id} open={open} onOpenChange={() => flip(`g:${g.id}`, open)}>
+            <CollapsibleTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full justify-start gap-2 px-1.5 font-semibold"
+              >
+                <ChevronRightIcon
+                  className={cn('text-muted-foreground transition-transform', open && 'rotate-90')}
+                />
+                <span className="size-2 shrink-0 rounded-[2px]" style={{ background: color }} />
+                {formulasGroup && <SigmaIcon className="text-muted-foreground" />}
+                <span className="shrink-0">{g.label}</span>
+                {g.note && (
+                  <span className="truncate text-xs font-normal text-muted-foreground max-md:hidden">
+                    {g.note}
+                  </span>
+                )}
+                <span className="num ml-auto text-xs font-normal text-muted-foreground">
+                  {all.filter((f) => shownKeys.includes(f.key)).length} / {all.length}
+                </span>
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="flex flex-col pl-6">
+              {topics.map((t) => {
+                const inTopic = fields.filter((f) => (f.topic ?? '') === t);
+                if (!t) return inTopic.map((f) => leaf(f, color));
+                const id = `t:${g.id}:${t}`;
+                const topicOpen = isOpen(
+                  id,
+                  all.filter((f) => f.topic === t),
+                );
+                return (
+                  <Collapsible key={t} open={topicOpen} onOpenChange={() => flip(id, topicOpen)}>
+                    <CollapsibleTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="w-full justify-start gap-1.5 px-1 text-muted-foreground"
+                      >
+                        <ChevronRightIcon
+                          className={cn('transition-transform', topicOpen && 'rotate-90')}
+                        />
+                        <span className="font-semibold">{t}</span>
+                        <span className="num">
+                          {inTopic.filter((f) => shownKeys.includes(f.key)).length}/{inTopic.length}
+                        </span>
+                        {g.sources?.[t] && (
+                          <span className="ml-auto truncate font-normal">{g.sources[t]}</span>
+                        )}
+                      </Button>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="flex flex-col pl-5">
+                      {inTopic.map((f) => leaf(f, color))}
+                    </CollapsibleContent>
+                  </Collapsible>
+                );
+              })}
+              {formulasGroup && onAddFormula && !q && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="justify-start gap-2 px-1 text-primary"
+                  onClick={onAddFormula}
+                >
+                  <PlusIcon />
+                  New formula
+                </Button>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One titled box of the layout pane. */
+function Box({
+  title,
+  action,
+  wide,
+  children,
+}: {
+  title: ReactNode;
+  action?: ReactNode;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      className={cn('flex min-w-0 flex-col gap-3 rounded-lg border p-3', wide && 'md:col-span-2')}
+    >
+      <h4 className="flex min-h-6 items-center justify-between gap-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+        {title}
+        {action && <span className="normal-case tracking-normal">{action}</span>}
+      </h4>
+      {children}
+    </section>
+  );
+}
+
+/** A label beside its control, as the layout boxes lay them out. */
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid grid-cols-[5rem_minmax(0,1fr)] items-center gap-2">
+      <span className="text-sm text-muted-foreground">{label}</span>
       {children}
     </div>
   );
 }
 
-function LayoutSection<T>({
+/** Picks several fields: a button naming them, a searchable checklist under it. */
+function MultiPick<T>({
+  label,
+  fields,
+  keys,
+  onToggle,
+}: {
+  label: string;
+  fields: ViewField<T>[];
+  keys: string[];
+  onToggle: (key: string, on: boolean) => void;
+}) {
+  const names = fields.filter((f) => keys.includes(f.key)).map((f) => f.label);
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          className="w-full min-w-0 justify-between font-normal"
+          aria-label={label}
+        >
+          <span className="truncate">{names.length ? names.join(', ') : 'None'}</span>
+          <ChevronDownIcon className="text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-0">
+        <Command>
+          <CommandInput placeholder="Search fields" />
+          <CommandList>
+            <CommandEmpty>No field found.</CommandEmpty>
+            <CommandGroup>
+              {fields.map((f) => {
+                const on = keys.includes(f.key);
+                return (
+                  <CommandItem
+                    key={f.key}
+                    value={`${f.label} ${f.key}`}
+                    onSelect={() => onToggle(f.key, !on)}
+                  >
+                    <Checkbox checked={on} className="pointer-events-none" tabIndex={-1} />
+                    <f.icon />
+                    {f.label}
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** The right pane: columns, shape, group, filter, sort, header tiles, the desk's own, More. */
+function LayoutPane<T>({
   domain,
   draft,
   setDraft,
-  offered,
+  shownKeys,
   current,
+  rows,
+  tileProblems,
+  onEditFormula,
+  editor,
+  more,
 }: {
   domain: ViewDomain<T>;
   draft: CustomViewConfig;
   setDraft: Setter;
-  offered: ViewField<T>[];
+  shownKeys: string[];
   current: FilterToken[];
+  rows: T[];
+  tileProblems: (string | null)[];
+  onEditFormula: (key: string) => void;
+  editor?: ViewEditorSection;
+  more: ReactNode;
 }) {
   const groupable = domain.fields.filter((f) => f.groupable);
+  const groupKeys = groupable.map((f) => f.key);
   const numbers = domain.fields.filter((f) => f.format !== 'text');
+  const filterKeys = domain.fields.filter((f) => f.filterable).map((f) => f.key);
+  // Number fields can be ticked too; they are off until ticked (Bikram, 2026-10-11).
+  const canFilterFields = domain.fields.filter(canFilter);
+  const canFilterKeys = canFilterFields.map((f) => f.key);
+  const groupChoices = draft.group.fields.length ? draft.group.fields : groupKeys;
+  const offered = groupable.filter((f) => groupChoices.includes(f.key));
+  const filterChoices = draft.filters.fields.length ? draft.filters.fields : filterKeys;
+  const byKey = new Map(domain.fields.map((f) => [f.key, f]));
+  const shown = shownKeys.map((k) => byKey.get(k)).filter((f): f is ViewField<T> => !!f);
   const pivot = draft.pivot;
-  const select = (
+  const fieldSelect = (
     label: string,
     value: string,
     fields: ViewField<T>[],
     onChange: (v: string) => void,
+    none?: string,
   ) => (
-    <Field label={label}>
-      <Select value={value || undefined} onValueChange={onChange}>
-        <SelectTrigger aria-label={label} className="w-full">
-          <SelectValue placeholder="Pick a field" />
-        </SelectTrigger>
-        <SelectContent>
-          {fields.map((f) => (
-            <SelectItem key={f.key} value={f.key}>
-              <f.icon />
-              {f.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </Field>
+    <Select value={value || (none ? NONE : undefined)} onValueChange={onChange}>
+      <SelectTrigger aria-label={label} className="w-full min-w-0">
+        <SelectValue placeholder="Pick a field" />
+      </SelectTrigger>
+      <SelectContent>
+        {none && <SelectItem value={NONE}>{none}</SelectItem>}
+        {fields.map((f) => (
+          <SelectItem key={f.key} value={f.key}>
+            <f.icon />
+            {f.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
+
   return (
-    <div className="flex flex-col gap-6">
-      <Field label="Shape">
+    <div className="grid content-start gap-3 md:grid-cols-2">
+      <Box
+        wide
+        title={
+          <span>
+            Columns · <span className="num">{shown.length}</span>
+          </span>
+        }
+        action={<span className="text-xs text-muted-foreground">drag to reorder</span>}
+      >
+        <ColumnChips
+          domain={domain}
+          draft={draft}
+          setDraft={setDraft}
+          shown={shown}
+          onEditFormula={onEditFormula}
+        />
+      </Box>
+      <Box title="Shape">
         <ToggleGroup
           type="single"
           variant="outline"
@@ -563,66 +789,94 @@ function LayoutSection<T>({
             );
           })}
         </ToggleGroup>
-      </Field>
-      {draft.shape === 'group' && (
-        <Field label="Opens grouped by">
-          <Select
-            value={draft.group.default ?? NONE}
-            onValueChange={(v) =>
-              setDraft({ ...draft, group: { ...draft.group, default: v === NONE ? null : v } })
-            }
-          >
-            <SelectTrigger aria-label="Default grouping" className="w-full sm:w-72">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>No grouping</SelectItem>
-              {offered.map((f) => (
-                <SelectItem key={f.key} value={f.key}>
-                  <f.icon />
-                  {f.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Readers switch between the fields ticked under Group on Fields.
-          </p>
-        </Field>
-      )}
-      {draft.shape === 'pivot' && pivot && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {select('Rows', pivot.rows, groupable, (rows) =>
-            setDraft({ ...draft, pivot: { ...pivot, rows } }),
+        {draft.shape === 'pivot' && pivot && (
+          <>
+            <Row label="Rows">
+              {fieldSelect('Pivot rows', pivot.rows, groupable, (rows) =>
+                setDraft({ ...draft, pivot: { ...pivot, rows } }),
+              )}
+            </Row>
+            <Row label="Columns">
+              {fieldSelect('Pivot columns', pivot.columns, groupable, (columns) =>
+                setDraft({ ...draft, pivot: { ...pivot, columns } }),
+              )}
+            </Row>
+            <Row label="Value">
+              {fieldSelect('Pivot value', pivot.value, numbers, (value) =>
+                setDraft({ ...draft, pivot: { ...pivot, value } }),
+              )}
+            </Row>
+            <Row label="Roll-up">
+              <Select
+                value={pivot.agg}
+                onValueChange={(agg) =>
+                  setDraft({ ...draft, pivot: { ...pivot, agg: agg as typeof pivot.agg } })
+                }
+              >
+                <SelectTrigger aria-label="Roll-up" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {viewAggs.map((a) => (
+                    <SelectItem key={a} value={a}>
+                      {AGG_LABELS[a]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Row>
+          </>
+        )}
+      </Box>
+      {groupable.length > 0 && (
+        <Box title="Group">
+          {draft.shape === 'group' && (
+            <Row label="Default">
+              {fieldSelect(
+                'Default grouping',
+                draft.group.default ?? '',
+                offered,
+                (v) =>
+                  setDraft({
+                    ...draft,
+                    group: { ...draft.group, default: v === NONE ? null : v },
+                  }),
+                'No grouping',
+              )}
+            </Row>
           )}
-          {select('Columns', pivot.columns, groupable, (columns) =>
-            setDraft({ ...draft, pivot: { ...pivot, columns } }),
-          )}
-          {select('Value', pivot.value, numbers, (value) =>
-            setDraft({ ...draft, pivot: { ...pivot, value } }),
-          )}
-          <Field label="Roll-up">
-            <Select
-              value={pivot.agg}
-              onValueChange={(agg) =>
-                setDraft({ ...draft, pivot: { ...pivot, agg: agg as typeof pivot.agg } })
+          <Row label="Choices">
+            <MultiPick
+              label="Group choices"
+              fields={groupable}
+              keys={groupChoices}
+              onToggle={(key, on) =>
+                setDraft({
+                  ...draft,
+                  group: {
+                    ...draft.group,
+                    fields: toggleIn(draft.group.fields, groupKeys, key, on),
+                    default: !on && draft.group.default === key ? null : draft.group.default,
+                  },
+                })
               }
-            >
-              <SelectTrigger aria-label="Roll-up" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {viewAggs.map((a) => (
-                  <SelectItem key={a} value={a}>
-                    {AGG_LABELS[a]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-        </div>
+            />
+          </Row>
+        </Box>
       )}
-      <Field label="Opens filtered by">
+      <Box
+        title="Filter"
+        action={
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setDraft({ ...draft, filters: { ...draft.filters, default: current } })}
+          >
+            <FilterIcon />
+            Use the page's filters
+          </Button>
+        }
+      >
         <div className="flex flex-wrap items-center gap-1.5">
           {draft.filters.default.map((t, i) => (
             <Badge key={tokenText(t)} variant="secondary" className="gap-1 pr-0.5 font-normal">
@@ -647,85 +901,116 @@ function LayoutSection<T>({
             </Badge>
           ))}
           {!draft.filters.default.length && (
-            <span className="text-sm text-muted-foreground">No filters.</span>
+            <span className="text-sm text-muted-foreground">Opens unfiltered.</span>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setDraft({ ...draft, filters: { ...draft.filters, default: current } })}
-          >
-            <FilterIcon />
-            Use the page's filters
-          </Button>
         </div>
-      </Field>
-      <Field label="Sidebar icon">
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          aria-label="Icon"
-          className="flex-wrap justify-start"
-          value={draft.icon ?? ''}
-          onValueChange={(v) =>
-            setDraft({ ...draft, icon: (v || null) as CustomViewConfig['icon'] })
-          }
-        >
-          {Object.entries(VIEW_ICONS).map(([name, Icon]) => (
-            <ToggleGroupItem key={name} value={name} aria-label={`Icon ${name}`}>
-              <Icon />
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-      </Field>
+        <Row label="Filterable">
+          <MultiPick
+            label="Filterable fields"
+            fields={canFilterFields}
+            keys={filterChoices}
+            onToggle={(key, on) =>
+              setDraft({
+                ...draft,
+                filters: {
+                  ...draft.filters,
+                  fields: toggleIn(draft.filters.fields, filterKeys, key, on, canFilterKeys),
+                  default: on
+                    ? draft.filters.default
+                    : draft.filters.default.filter((t) => t.key !== key),
+                },
+              })
+            }
+          />
+        </Row>
+      </Box>
+      <Box title="Sort">
+        <Row label="By">
+          <div className="flex min-w-0 items-center gap-2">
+            {fieldSelect(
+              'Sort by',
+              draft.sort?.key ?? '',
+              shown,
+              (v) =>
+                setDraft({
+                  ...draft,
+                  sort: v === NONE ? null : { key: v, desc: draft.sort?.desc ?? true },
+                }),
+              'As loaded',
+            )}
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              spacing={0}
+              aria-label="Sort direction"
+              disabled={!draft.sort}
+              value={draft.sort?.desc ? 'desc' : 'asc'}
+              onValueChange={(v) =>
+                v &&
+                draft.sort &&
+                setDraft({ ...draft, sort: { ...draft.sort, desc: v === 'desc' } })
+              }
+            >
+              <ToggleGroupItem value="asc" aria-label="Ascending">
+                <ArrowUpIcon />
+              </ToggleGroupItem>
+              <ToggleGroupItem value="desc" aria-label="Descending">
+                <ArrowDownIcon />
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+        </Row>
+      </Box>
+      {(domain.widgets?.length || domain.formulas) && (
+        <Box wide title="Header tiles">
+          <SummarySection
+            domain={domain}
+            draft={draft}
+            setDraft={setDraft}
+            rows={rows}
+            tileProblems={tileProblems}
+          />
+        </Box>
+      )}
+      {editor && (
+        <Box wide title={editor.title}>
+          {editor.description && (
+            <p className="text-sm text-muted-foreground">{editor.description}</p>
+          )}
+          {editor.content}
+        </Box>
+      )}
+      <Box wide title="More">
+        {more}
+      </Box>
     </div>
   );
 }
 
-const CHIP_TEXT = 'text';
-const ROW_GRID =
-  'grid grid-cols-[1rem_minmax(0,1fr)_2.25rem_5.5rem_2.25rem_2.25rem_1.5rem] items-center gap-1 px-1.5 md:grid-cols-[1.25rem_minmax(0,1fr)_3rem_8rem_3rem_3rem_2rem] md:gap-2 md:px-2';
-
-function FieldsSection<T>({
-  base,
+/** The shown columns as chips: drag to reorder, × to hide, a click for chip placement. */
+function ColumnChips<T>({
   domain,
   draft,
   setDraft,
-  shownKeys,
-  query,
-  formulaProblems,
+  shown,
+  onEditFormula,
 }: {
-  base: ViewDomain<T>;
   domain: ViewDomain<T>;
   draft: CustomViewConfig;
   setDraft: Setter;
-  shownKeys: string[];
-  query: string;
-  formulaProblems: (string | null)[];
+  shown: ViewField<T>[];
+  onEditFormula: (key: string) => void;
 }) {
   const sensors = useDrag();
-  const [editing, setEditing] = useState<string | null>(null);
-  const [hiddenOpen, setHiddenOpen] = useState(false);
-  const formulas = formulasOf(draft);
+  const keys = shown.map((f) => f.key);
   const chips = chipsOf(draft);
-  const allKeys = domain.fields.map((f) => f.key);
-  const groupKeys = domain.fields.filter((f) => f.groupable).map((f) => f.key);
-  const filterKeys = domain.fields.filter((f) => f.filterable).map((f) => f.key);
-  const byKey = new Map(domain.fields.map((f) => [f.key, f]));
-  const first = byKey.get(shownKeys[0] ?? '');
-  const match = (f: ViewField<T>) =>
-    !query || f.label.toLowerCase().includes(query) || f.key.includes(query);
+  const first = shown[0];
+  const colorOf = (f: ViewField<T>) =>
+    domain.groups?.find((g) => g.id === groupOf(domain, f))?.color ?? PLAIN;
   // Categorical text a reader sorts rows by (a kind, an account, a label) can be a chip.
   const chippable = (f: ViewField<T>) =>
     f.format === 'text' && (f.filterable || f.groupable) && f.key !== first?.key;
-  // Shown fields first, in order; then hidden text fields (they still group and filter); the
-  // rest fold away until asked for.
-  const shown = shownKeys.map((k) => byKey.get(k)).filter((f): f is ViewField<T> => !!f);
-  const hiddenText = domain.fields.filter(
-    (f) => !shownKeys.includes(f.key) && (f.groupable || f.filterable),
-  );
-  const hidden = domain.fields.filter((f) => !shownKeys.includes(f.key) && !hiddenText.includes(f));
-  const setColumns = (columns: string[]) => setDraft({ ...draft, columns });
   const placement = (key: string) => chips.find((c) => c.key === key)?.placement ?? CHIP_TEXT;
   const setPlacement = (key: string, v: string) =>
     setDraft({
@@ -737,299 +1022,309 @@ function FieldsSection<T>({
             ? chips.map((c) => (c.key === key ? { key, placement: v as ViewChipPlacement } : c))
             : [...chips, { key, placement: v as ViewChipPlacement }],
     });
-  const formulaKeys = (key: string) => {
-    const i = formulas.findIndex((f) => f.key === key);
-    return [
-      ...base.fields.filter((f) => f.format !== 'text').map((f) => f.key),
-      ...formulas.slice(0, i).map((f) => f.key),
-    ];
-  };
-
-  const row = (f: ViewField<T>, sortable: boolean) => {
-    const on = shownKeys.includes(f.key);
-    const fi = formulas.findIndex((x) => x.key === f.key);
-    const formula = fi >= 0 ? formulas[fi] : undefined;
-    return (
-      <FieldRow key={f.key} id={f.key} sortable={sortable} muted={!on}>
-        <span className="flex min-w-0 items-center gap-2">
-          <f.icon className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">{f.label}</span>
-          {f.note && (
-            <Badge variant="secondary" className="hidden font-normal sm:inline-flex">
-              {f.note}
-            </Badge>
-          )}
-          {formula && (
-            <Badge variant="outline" className="hidden text-primary sm:inline-flex">
-              formula
-            </Badge>
-          )}
-          {formula && formulaProblems[fi] && (
-            <Badge variant="destructive" className="font-normal">
-              fix
-            </Badge>
-          )}
-        </span>
-        <span className="grid place-items-center">
-          <Switch
-            size="sm"
-            aria-label={`Show ${f.label}`}
-            checked={on}
-            onCheckedChange={(v) =>
-              setColumns(v ? [...shownKeys, f.key] : shownKeys.filter((k) => k !== f.key))
-            }
-          />
-        </span>
-        <span className="min-w-0">
-          {chippable(f) ? (
-            <Select value={placement(f.key)} onValueChange={(v) => setPlacement(f.key, v)}>
-              <SelectTrigger
-                size="sm"
-                aria-label={`${f.label} as a chip`}
-                className="h-7 w-full min-w-0 px-2 text-xs"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={CHIP_TEXT}>Text</SelectItem>
-                <SelectItem value="column">Own column</SelectItem>
-                <SelectItem value="inline">On {first?.label ?? 'the first column'}</SelectItem>
-              </SelectContent>
-            </Select>
-          ) : (
-            <Dash />
-          )}
-        </span>
-        <span className="grid place-items-center">
-          {f.groupable ? (
-            <Checkbox
-              aria-label={`Group by ${f.label}`}
-              checked={(draft.group.fields.length ? draft.group.fields : groupKeys).includes(f.key)}
-              onCheckedChange={(v) =>
-                setDraft({
-                  ...draft,
-                  group: {
-                    ...draft.group,
-                    fields: toggleIn(draft.group.fields, groupKeys, f.key, v === true),
-                    default:
-                      v !== true && draft.group.default === f.key ? null : draft.group.default,
-                  },
-                })
-              }
-            />
-          ) : (
-            <Dash />
-          )}
-        </span>
-        <span className="grid place-items-center">
-          {f.filterable ? (
-            <Checkbox
-              aria-label={`Filter by ${f.label}`}
-              checked={(draft.filters.fields.length ? draft.filters.fields : filterKeys).includes(
-                f.key,
-              )}
-              onCheckedChange={(v) =>
-                setDraft({
-                  ...draft,
-                  filters: {
-                    ...draft.filters,
-                    fields: toggleIn(draft.filters.fields, filterKeys, f.key, v === true),
-                    default:
-                      v === true
-                        ? draft.filters.default
-                        : draft.filters.default.filter((t) => t.key !== f.key),
-                  },
-                })
-              }
-            />
-          ) : (
-            <Dash />
-          )}
-        </span>
-        <span className="grid place-items-center">
-          {formula && (
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`Edit formula ${f.label}`}
-              aria-expanded={editing === f.key}
-              onClick={() => setEditing(editing === f.key ? null : f.key)}
-            >
-              <PencilIcon />
-            </Button>
-          )}
-        </span>
-        {formula && editing === f.key && (
-          <FormulaForm
-            formula={formula}
-            issue={formulaProblems[fi] ?? null}
-            keys={formulaKeys(f.key)}
-            onChange={(p) => {
-              const next = formulas.map((x, j) => (j === fi ? { ...x, ...p } : x));
-              // A renamed key carries its column, chip and tiles with it.
-              const was = formula.key;
-              const now = p.key ?? was;
-              const rename = (k: string) => (k === was ? now : k);
-              setDraft({
-                ...draft,
-                formulas: next,
-                columns: draft.columns.map(rename),
-                tiles: tilesOf(draft).map((t) => ({ ...t, field: rename(t.field) })),
-              });
-              if (now !== was) setEditing(now);
-            }}
-            onRemove={() => {
-              setEditing(null);
-              setDraft({
-                ...draft,
-                formulas: formulas.filter((_, j) => j !== fi),
-                columns: draft.columns.filter((k) => k !== f.key),
-              });
-            }}
-            onDone={() => setEditing(null)}
-          />
-        )}
-      </FieldRow>
-    );
-  };
-
+  if (!shown.length)
+    return <p className="text-sm text-muted-foreground">Tick fields on the left to show them.</p>;
   return (
-    <div className="flex flex-col gap-3">
-      <div className="overflow-hidden rounded-lg border" data-testid="view-fields">
-        <div
-          className={cn(
-            ROW_GRID,
-            'sticky top-0 z-10 h-8 bg-muted text-[0.65rem] font-semibold md:tracking-wide text-muted-foreground uppercase md:text-[0.7rem]',
-          )}
-        >
-          <span />
-          <span>Field</span>
-          <span className="text-center">Show</span>
-          <span className="text-center">Chip</span>
-          <span className="text-center">Group</span>
-          <span className="text-center">Filter</span>
-          <span />
-        </div>
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={(e) => setColumns(moved(shownKeys, e))}
-        >
-          <SortableContext items={shownKeys} strategy={verticalListSortingStrategy}>
-            {shown.filter(match).map((f) => row(f, !query))}
-          </SortableContext>
-        </DndContext>
-        {hiddenText.filter(match).map((f) => row(f, false))}
-        {hidden.filter(match).length > 0 && (
-          <Collapsible open={hiddenOpen || !!query} onOpenChange={setHiddenOpen}>
-            <CollapsibleTrigger asChild>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={(e) => setDraft({ ...draft, columns: moved(keys, e) })}
+    >
+      <SortableContext items={keys} strategy={rectSortingStrategy}>
+        <div className="flex flex-wrap gap-1.5" data-testid="view-columns">
+          {shown.map((f) => (
+            <ColumnChip key={f.key} id={f.key} color={colorOf(f)}>
+              {chippable(f) || formulasOf(draft).some((x) => x.key === f.key) ? (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="ghost" size="xs" className="h-6 px-1 font-normal">
+                      {f.label}
+                      {placement(f.key) !== CHIP_TEXT && (
+                        <Badge variant="secondary" className="h-4 px-1 text-[0.65rem]">
+                          chip
+                        </Badge>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="flex w-64 flex-col gap-2 p-3">
+                    {chippable(f) && (
+                      <>
+                        <span className="text-sm font-medium">Show {f.label} as</span>
+                        <ToggleGroup
+                          type="single"
+                          variant="outline"
+                          size="sm"
+                          spacing={0}
+                          className="w-full"
+                          aria-label={`${f.label} as a chip`}
+                          value={placement(f.key)}
+                          onValueChange={(v) => v && setPlacement(f.key, v)}
+                        >
+                          <ToggleGroupItem value={CHIP_TEXT} className="flex-1">
+                            Text
+                          </ToggleGroupItem>
+                          <ToggleGroupItem value="column" className="flex-1">
+                            Chip
+                          </ToggleGroupItem>
+                          <ToggleGroupItem value="inline" className="flex-1">
+                            On {first?.label ?? 'first'}
+                          </ToggleGroupItem>
+                        </ToggleGroup>
+                      </>
+                    )}
+                    {formulasOf(draft).some((x) => x.key === f.key) && (
+                      <Button variant="outline" size="sm" onClick={() => onEditFormula(f.key)}>
+                        <PencilIcon />
+                        Edit formula
+                      </Button>
+                    )}
+                  </PopoverContent>
+                </Popover>
+              ) : (
+                <span className="px-1 text-xs">{f.label}</span>
+              )}
               <Button
                 variant="ghost"
-                className="h-10 w-full justify-start rounded-none border-t px-3 font-normal text-muted-foreground"
+                size="icon-xs"
+                className="size-5 text-muted-foreground"
+                aria-label={`Hide ${f.label}`}
+                onClick={() => setDraft({ ...draft, columns: keys.filter((k) => k !== f.key) })}
               >
-                <ChevronRightIcon
-                  className={cn('transition-transform', (hiddenOpen || query) && 'rotate-90')}
-                />
-                {hidden.filter(match).length} more fields, hidden
+                <XIcon />
               </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="flex flex-wrap gap-1.5 border-t bg-muted/30 p-3">
-              {hidden.filter(match).map((f) => (
-                <Button
-                  key={f.key}
-                  variant="outline"
-                  size="xs"
-                  className="rounded-full border-dashed font-normal"
-                  onClick={() => setColumns([...shownKeys, f.key])}
-                >
-                  <PlusIcon />
-                  {f.label}
-                </Button>
-              ))}
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {base.formulas && (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={formulas.length >= MAX_FORMULAS}
-            onClick={() => {
-              const n = formulas.length + 1;
-              let key = `formula_${n}`;
-              for (let k = n; allKeys.includes(key); k++) key = `formula_${k + 1}`;
-              setDraft({
-                ...draft,
-                formulas: [
-                  ...formulas,
-                  { key, label: `Formula ${n}`, expr: '', format: 'number', agg: null },
-                ],
-                columns: [...shownKeys, key],
-              });
-              setEditing(key);
-            }}
-          >
-            <SigmaIcon />
-            Add formula
-          </Button>
-        )}
-        <span className="text-xs text-muted-foreground">
-          Drag <GripVerticalIcon className="inline size-3" /> to reorder columns.
-          {base.formulas &&
-            ' A formula reads field keys with + - * / % ^, comparisons, a ? b : c, group_sum("key") over the row’s group and total_sum("key") over every shown row.'}
-        </span>
+            </ColumnChip>
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
+/** One column chip: a drag handle, its group's colour, then its controls. */
+function ColumnChip({ id, color, children }: { id: string; color: string; children: ReactNode }) {
+  const s = useSortable({ id });
+  return (
+    <Badge
+      ref={s.setNodeRef}
+      variant="outline"
+      data-field={id}
+      style={{ transform: CSS.Transform.toString(s.transform), transition: s.transition }}
+      className={cn(
+        'h-7 gap-1 bg-card pr-0.5 pl-0.5 font-normal',
+        s.isDragging && 'z-20 shadow-md',
+      )}
+    >
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        className="size-5 cursor-grab touch-none text-muted-foreground active:cursor-grabbing"
+        aria-label={`Drag ${id}`}
+        {...s.attributes}
+        {...s.listeners}
+      >
+        <GripVerticalIcon />
+      </Button>
+      <span className="size-2 shrink-0 rounded-[2px]" style={{ background: color }} />
+      {children}
+    </Badge>
+  );
+}
+
+/** A formula open in the right pane, with a way back to the layout. */
+function FormulaEditor<T>({
+  base,
+  draft,
+  setDraft,
+  formulaProblems,
+  editing,
+  setEditing,
+}: {
+  base: ViewDomain<T>;
+  draft: CustomViewConfig;
+  setDraft: Setter;
+  formulaProblems: (string | null)[];
+  editing: string;
+  setEditing: (key: string | null) => void;
+}) {
+  const formulas = formulasOf(draft);
+  const fi = formulas.findIndex((f) => f.key === editing);
+  const formula = formulas[fi];
+  const back = (
+    <Button variant="ghost" size="sm" className="self-start" onClick={() => setEditing(null)}>
+      <ArrowLeftIcon />
+      Layout
+    </Button>
+  );
+  if (!formula) return back;
+  const keys = [
+    ...base.fields.filter((f) => f.format !== 'text').map((f) => f.key),
+    ...formulas.slice(0, fi).map((f) => f.key),
+  ];
+  return (
+    <div className="flex flex-col gap-3">
+      {back}
+      <h3 className="flex items-center gap-2 text-base font-semibold">
+        <SigmaIcon className="size-4 text-muted-foreground" />
+        {formula.label || formula.key}
+      </h3>
+      <p className="text-sm text-muted-foreground">
+        A formula reads field keys with + - * / % ^, comparisons, a ? b : c, group_sum("key") over
+        the row’s group and total_sum("key") over every shown row.
+      </p>
+      <div className="overflow-hidden rounded-lg border [&>div]:border-t-0">
+        <FormulaForm
+          formula={formula}
+          issue={formulaProblems[fi] ?? null}
+          keys={keys}
+          onChange={(p) => {
+            const next = formulas.map((x, j) => (j === fi ? { ...x, ...p } : x));
+            // A renamed key carries its column, chip, sort and tiles with it.
+            const was = formula.key;
+            const now = p.key ?? was;
+            const rename = (k: string) => (k === was ? now : k);
+            setDraft({
+              ...draft,
+              formulas: next,
+              columns: draft.columns.map(rename),
+              tiles: tilesOf(draft).map((t) => ({ ...t, field: rename(t.field) })),
+              sort: draft.sort ? { ...draft.sort, key: rename(draft.sort.key) } : null,
+            });
+            if (now !== was) setEditing(now);
+          }}
+          onRemove={() => {
+            setEditing(null);
+            setDraft({
+              ...draft,
+              formulas: formulas.filter((_, j) => j !== fi),
+              columns: draft.columns.filter((k) => k !== formula.key),
+            });
+          }}
+          onDone={() => setEditing(null)}
+        />
       </div>
     </div>
   );
 }
 
-function Dash() {
-  return <span className="block text-center text-muted-foreground/50">–</span>;
-}
+/** Icon matches shown at once; search narrows the rest of lucide's set. */
+const ICON_MATCHES = 120;
 
-/** One row of the Fields list; shown rows drag by their handle. */
-function FieldRow({
-  id,
-  sortable,
-  muted,
-  children,
-}: {
-  id: string;
-  sortable: boolean;
-  muted: boolean;
-  children: ReactNode;
-}) {
-  const s = useSortable({ id, disabled: !sortable });
+/** The sidebar icon: a popup with every lucide icon and every emoji (Bikram, 2026-10-12). */
+function IconPicker({ draft, setDraft }: { draft: CustomViewConfig; setDraft: Setter }) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<'icons' | 'emoji'>('icons');
+  const [q, setQ] = useState('');
+  const Icon = viewIcon(draft);
+  const pick = (icon: CustomViewConfig['icon']) => {
+    setDraft({ ...draft, icon });
+    setOpen(false);
+  };
+  const term = q.trim().toLowerCase().replace(/\s+/g, '-');
+  const quick = Object.keys(VIEW_ICONS);
+  const names = (
+    term
+      ? lucideIconNames.filter((n) => n.includes(term))
+      : [...quick, ...lucideIconNames.filter((n) => !quick.includes(n))]
+  ).slice(0, ICON_MATCHES);
   return (
-    <div
-      ref={s.setNodeRef}
-      data-field={id}
-      style={{ transform: CSS.Transform.toString(s.transform), transition: s.transition }}
-      className={cn(
-        ROW_GRID,
-        'min-h-11 border-t bg-popover py-1.5 text-sm',
-        muted && '[&>span:nth-child(2)]:text-muted-foreground',
-        s.isDragging && 'relative z-20 shadow-md',
-      )}
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (o) setQ('');
+      }}
     >
-      {sortable ? (
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label="Sidebar icon" title="Sidebar icon">
+          <Icon />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="flex w-80 flex-col gap-0 p-0">
+        <div className="p-2">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={0}
+            className="w-full"
+            aria-label="Icons or emoji"
+            value={kind}
+            onValueChange={(v) => v && setKind(v as typeof kind)}
+          >
+            <ToggleGroupItem value="icons" className="flex-1">
+              <ShapesIcon />
+              Icons
+            </ToggleGroupItem>
+            <ToggleGroupItem value="emoji" className="flex-1">
+              <SmileIcon />
+              Emoji
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
+        <Separator />
+        {kind === 'icons' ? (
+          <div className="flex h-80 flex-col">
+            <div className="border-b p-2">
+              <InputGroup>
+                <InputGroupAddon>
+                  <SearchIcon />
+                </InputGroupAddon>
+                <InputGroupInput
+                  aria-label="Search icons"
+                  placeholder={`Search ${lucideIconNames.length.toLocaleString()} icons`}
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                />
+              </InputGroup>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {names.length ? (
+                <div className="grid grid-cols-8 gap-1">
+                  {names.map((n) => {
+                    const I = viewIcon({ icon: n, shape: draft.shape });
+                    return (
+                      <Button
+                        key={n}
+                        variant={draft.icon === n ? 'secondary' : 'ghost'}
+                        size="icon-sm"
+                        title={n}
+                        aria-label={`Icon ${n}`}
+                        aria-pressed={draft.icon === n}
+                        onClick={() => pick(n)}
+                      >
+                        <I />
+                      </Button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="py-8 text-center text-sm text-muted-foreground">No icon found.</p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <EmojiPicker
+            className="h-80 w-full"
+            columns={9}
+            onEmojiSelect={({ emoji }) => pick(emoji)}
+          >
+            <EmojiPickerSearch placeholder="Search emoji" />
+            <EmojiPickerContent />
+          </EmojiPicker>
+        )}
+        <Separator />
         <Button
           variant="ghost"
-          size="icon-xs"
-          className="cursor-grab touch-none text-muted-foreground active:cursor-grabbing"
-          aria-label={`Drag ${id}`}
-          {...s.attributes}
-          {...s.listeners}
+          size="sm"
+          className="m-1 justify-start"
+          disabled={!draft.icon}
+          onClick={() => pick(null)}
         >
-          <GripVerticalIcon />
+          <RotateCcwIcon />
+          Use the shape's icon
         </Button>
-      ) : (
-        <span />
-      )}
-      {children}
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -1203,7 +1498,7 @@ function SummarySection<T>({
                 setDraft({ ...draft, tiles: tiles.filter((_, j) => j !== ti) });
               }}
             >
-              <Button variant="outline" size="sm" className="text-destructive">
+              <Button variant="destructive" size="sm">
                 <Trash2Icon />
                 Remove
               </Button>
@@ -1370,7 +1665,7 @@ function MoreSection({
 }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       {viewId && (
         <Field label="View id">
           <p className="text-xs text-muted-foreground">
@@ -1418,13 +1713,22 @@ function MoreSection({
             </span>
           </div>
           <ConfirmDelete title={`Delete view ${name}?`} onConfirm={onDelete}>
-            <Button variant="outline" className="text-destructive">
+            <Button variant="destructive">
               <Trash2Icon />
               Delete…
             </Button>
           </ConfirmDelete>
         </div>
       )}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium">{label}</span>
+      {children}
     </div>
   );
 }

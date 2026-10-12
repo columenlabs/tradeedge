@@ -18,7 +18,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Textarea } from './ui/textarea';
-import type { ViewField } from './view-model';
+import { FORMULAS_GROUP, type ViewField } from './view-model';
 
 export const MAX_FORMULAS = 20;
 export const FORMAT_LABELS: Record<ViewFormula['format'], string> = {
@@ -43,6 +43,7 @@ export function formulaFields<T>(formulas: ViewFormula[]): ViewField<T>[] {
     return {
       key: f.key,
       label: f.label,
+      group: FORMULAS_GROUP,
       icon: SigmaIcon,
       value: () => null,
       format: f.format,
@@ -217,7 +218,7 @@ export function FormulaForm({
             action="Remove"
             onConfirm={onRemove}
           >
-            <Button variant="outline" size="sm" className="text-destructive">
+            <Button variant="destructive" size="sm">
               <Trash2Icon />
               Remove
             </Button>

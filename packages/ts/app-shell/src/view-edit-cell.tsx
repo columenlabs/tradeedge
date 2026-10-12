@@ -21,6 +21,7 @@ export function EditCell({
   label,
   value,
   options,
+  unused = [],
   chip,
   note,
   onSave,
@@ -30,6 +31,8 @@ export function EditCell({
   value: string | null;
   /** Values already in use, offered first. */
   options: string[];
+  /** Values that exist but no row has, offered after (Bikram, 2026-10-12). */
+  unused?: string[];
   chip?: boolean;
   /** One line under the input saying what the edit covers, e.g. `every SPY holding`. */
   note?: string;
@@ -54,7 +57,8 @@ export function EditCell({
     }
   };
   const fresh = typed.trim();
-  const isNew = fresh !== '' && !options.some((o) => o.toLowerCase() === fresh.toLowerCase());
+  const isNew =
+    fresh !== '' && ![...options, ...unused].some((o) => o.toLowerCase() === fresh.toLowerCase());
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -107,19 +111,27 @@ export function EditCell({
                 </CommandItem>
               </CommandGroup>
             )}
-            {options.length > 0 && (
-              <CommandGroup heading="In use">
-                {options.map((o) => (
-                  <CommandItem
-                    key={o}
-                    value={o}
-                    data-checked={o === value}
-                    onSelect={() => save(o)}
-                  >
-                    {o}
-                  </CommandItem>
-                ))}
-              </CommandGroup>
+            {(
+              [
+                ['In use', options],
+                ['Unused', unused],
+              ] as const
+            ).map(
+              ([heading, list]) =>
+                list.length > 0 && (
+                  <CommandGroup key={heading} heading={heading}>
+                    {list.map((o) => (
+                      <CommandItem
+                        key={o}
+                        value={o}
+                        data-checked={o === value}
+                        onSelect={() => save(o)}
+                      >
+                        {o}
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                ),
             )}
             {value !== null && (
               <>

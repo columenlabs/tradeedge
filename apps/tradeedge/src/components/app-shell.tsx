@@ -222,6 +222,7 @@ function PortfolioSection() {
         group: { fields: [], default: 'underlying' },
         filters: { fields: [], default: [] },
         pivot: null,
+        sort: null,
       }),
     onSuccess: (v) => {
       void qc.invalidateQueries({ queryKey: portfolioViewsQuery('holdings').queryKey });
@@ -249,6 +250,64 @@ function PortfolioSection() {
       removeLabel={(item) => `Delete view ${item.title}`}
       items={[...views.filter((v) => v.app), ...views.filter((v) => !v.app)].map((v) => ({
         id: `${v.domain}/${v.id}`,
+        title: v.name,
+        to: portfolioViewPath(v),
+        icon: viewIcon(v.config),
+        fixed: v.app,
+      }))}
+    />
+  );
+}
+
+/**
+ * Symbols (Bikram, 2026-10-12): stock screens, views over your holdings' and watchlist's symbols
+ * (and DataEdge's list): My symbols, then the person's own. `+` starts a new screen.
+ */
+function SymbolsSection() {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const path = useRouterState({ select: (s) => s.location.pathname });
+  const list = useQuery(portfolioViewsQuery('symbols'));
+  const views = list.data ?? [];
+  const listKey = portfolioViewsQuery('symbols').queryKey;
+  const create = useMutation({
+    mutationFn: () =>
+      savePortfolioView('symbols', {
+        name: 'New screen',
+        shape: 'table',
+        formulas: [],
+        tiles: [],
+        columns: ['symbol', 'in', 'industry', 'market_cap', 'pe_ttm', 'buy_pct', 'earnings_next'],
+        chips: [],
+        icon: null,
+        widgets: [],
+        group: { fields: [], default: null },
+        filters: { fields: [], default: [] },
+        pivot: null,
+        sort: null,
+      }),
+    onSuccess: (v) => {
+      void qc.invalidateQueries({ queryKey: listKey });
+      void navigate({ to: portfolioViewPath(v) });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => deletePortfolioView('symbols', id),
+    onSuccess: (_, id) => {
+      void qc.invalidateQueries({ queryKey: listKey });
+      if (path === portfolioViewPath({ domain: 'symbols', id })) void navigate({ to: '/symbols' });
+    },
+  });
+  return (
+    <SidebarSection
+      label="Symbols"
+      loading={list.isPending}
+      onAdd={() => create.mutate()}
+      addLabel="New stock screen"
+      onRemove={(item) => remove.mutate(item.id)}
+      removeLabel={(item) => `Delete view ${item.title}`}
+      items={[...views.filter((v) => v.app), ...views.filter((v) => !v.app)].map((v) => ({
+        id: v.id,
         title: v.name,
         to: portfolioViewPath(v),
         icon: viewIcon(v.config),
@@ -311,6 +370,7 @@ export function StrategyShell() {
             <ScreenersSection />
             <WatchlistSection />
             <PortfolioSection />
+            <SymbolsSection />
             <LogsSection />
           </>
         }

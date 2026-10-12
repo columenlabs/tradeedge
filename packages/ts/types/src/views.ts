@@ -3,6 +3,7 @@
 // A desk produces rows of columns; these schemas say how a view shows them, and `views/shape.ts`
 // in the Worker rolls them up.
 import { z } from 'zod';
+import { SYMBOL_FIELDS } from './symbols';
 import { checkViewFormula } from './view-formula';
 
 export {
@@ -45,17 +46,36 @@ export const viewPivotSchema = z.object({
   value: viewKey.nullable().default(null),
   agg: z.enum(viewAggs).default('mean'),
 });
+/** A number condition on a number field (Bikram, 2026-10-11): `value` is a number, or `a..b` for between. */
+export const viewTokenOps = ['gt', 'lt', 'eq', 'between'] as const;
+export type ViewTokenOp = (typeof viewTokenOps)[number];
+const NUM = '-?\\d+(?:\\.\\d+)?';
+const numberToken = (t: { value: string; op?: ViewTokenOp }) =>
+  !t.op || new RegExp(t.op === 'between' ? `^${NUM}\\.\\.${NUM}$` : `^${NUM}$`).test(t.value);
 /**
  * A filter token, `key:value` (symbol:QQQ); `not: true` excludes the value. On one key a row must
  * have one of its included values (if any) and none of its excluded ones; tokens on different keys
- * must all match. Text matches without case, a number by its value.
+ * must all match. Text matches without case, a number by its value. With `op`, a number field
+ * keeps the rows above (`gt`), below (`lt`), at (`eq`) or `between` the value (`a..b`, inclusive).
  */
-export const viewTokenSchema = z.object({
-  key: viewKey,
-  value: z.string().trim().min(1).max(40),
-  not: z.boolean().optional(),
-});
+export const viewTokenSchema = z
+  .object({
+    key: viewKey,
+    value: z.string().trim().min(1).max(40),
+    not: z.boolean().optional(),
+    op: z.enum(viewTokenOps).optional(),
+  })
+  .refine(numberToken, 'a number condition needs a number, or a..b for between');
 export type ViewToken = z.infer<typeof viewTokenSchema>;
+/** Whether `n` meets a number token's condition; `eq` matches to the cent. */
+export function meetsNumber(op: ViewTokenOp | undefined, value: string, n: number | null) {
+  if (n === null || !Number.isFinite(n)) return false;
+  const [a = Number.NaN, b = Number.NaN] = value.split('..').map(Number);
+  if (op === 'gt') return n > a;
+  if (op === 'lt') return n < a;
+  if (op === 'between') return n >= Math.min(a, b) && n <= Math.max(a, b);
+  return Math.abs(n - a) < 0.005;
+}
 export const viewFilterSchema = z
   .object({
     /** The columns a reader can filter on. */
@@ -115,7 +135,7 @@ export function viewShapedCsv(shaped: ViewGrouped | ViewPivoted): string {
  * Field keys are the domain's own (`symbol`, `account`), so any short key is allowed.
  */
 const fieldKey = z.string().trim().min(1).max(40);
-/** Icons a person can pick for a view (lucide names; the shell maps them). */
+/** The quick-pick icons for a view (lucide names; the shell maps them). */
 export const viewIconNames = [
   'table',
   'list-tree',
@@ -143,6 +163,15 @@ export const viewIconNames = [
   'tag',
 ] as const;
 export type ViewIconName = (typeof viewIconNames)[number];
+/**
+ * A view's sidebar icon (Bikram, 2026-10-12): any lucide icon name in kebab case (`viewIconNames`
+ * are the quick picks; an unknown name shows the shape's icon), or one emoji.
+ */
+export const viewIconSchema = z.union([
+  z.string().regex(/^[a-z][a-z0-9-]{0,48}$/),
+  z.emoji().max(16),
+]);
+export type ViewIcon = z.infer<typeof viewIconSchema>;
 /** Formats a formula column can take. */
 export const viewFormulaFormats = [
   'number',
@@ -197,8 +226,8 @@ export const customViewConfigSchema = z.object({
   columns: z.array(fieldKey).max(60).default([]),
   /** Text fields shown as chips (a kind, an account, a label), each in its own column or inline. */
   chips: z.array(viewChipSchema).max(MAX_FIELDS).default([]),
-  /** The sidebar icon, one of `viewIconNames`; null = the shape's icon. */
-  icon: z.enum(viewIconNames).nullable().default(null),
+  /** The sidebar icon, a lucide name or an emoji; null = the shape's icon. */
+  icon: viewIconSchema.nullable().default(null),
   /** The domain's widgets (summary tiles) shown above the table, in order. */
   widgets: z.array(fieldKey).max(MAX_FIELDS).default([]),
   /** The view's own tiles, after the widgets. */
@@ -216,11 +245,14 @@ export const customViewConfigSchema = z.object({
       fields: z.array(fieldKey).max(MAX_FIELDS).default([]),
       default: z
         .array(
-          z.object({
-            key: fieldKey,
-            value: z.string().trim().min(1).max(40),
-            not: z.boolean().optional(),
-          }),
+          z
+            .object({
+              key: fieldKey,
+              value: z.string().trim().min(1).max(40),
+              not: z.boolean().optional(),
+              op: z.enum(viewTokenOps).optional(),
+            })
+            .refine(numberToken, 'a number condition needs a number, or a..b for between'),
         )
         .max(MAX_FIELDS)
         .default([]),
@@ -228,6 +260,11 @@ export const customViewConfigSchema = z.object({
     .prefault({}),
   pivot: z
     .object({ rows: fieldKey, columns: fieldKey, value: fieldKey, agg: z.enum(viewAggs) })
+    .nullable()
+    .default(null),
+  /** The column the table opens sorted by (Bikram, 2026-10-12, mock 2b); null keeps the rows' order. */
+  sort: z
+    .object({ key: fieldKey, desc: z.boolean().default(false) })
     .nullable()
     .default(null),
 });
@@ -286,7 +323,22 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
       widgets: ['value', 'day_pnl', 'unrealized', 'realized_ytd', 'check'],
       group: { fields: ['account', 'tax_type', 'underlying', 'kind'], default: 'account' },
       // Open holdings first; drop the token, or add Closed, to see what was sold out this year.
-      filters: { fields: [], default: [{ key: 'status', value: 'Open' }] },
+      filters: {
+        fields: [
+          'symbol',
+          'underlying',
+          'kind',
+          'sector',
+          'basket',
+          'account',
+          'tax_type',
+          'status',
+          'dividends',
+          'realized',
+          'unrealized',
+        ],
+        default: [{ key: 'status', value: 'Open' }],
+      },
     }),
   },
   {
@@ -350,6 +402,63 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
     }),
   },
   {
+    id: 'my-symbols',
+    app: true,
+    desk: 'trade',
+    domain: 'symbols',
+    owner: null,
+    name: 'My symbols',
+    config: customViewConfigSchema.parse({
+      shape: 'table',
+      columns: [
+        'symbol',
+        'industry',
+        'market_cap',
+        'pe_ttm',
+        'div_yield',
+        'earnings_next',
+        'market_value',
+        'accounts',
+      ],
+      icon: 'target',
+      group: { fields: ['in', 'industry'], default: null },
+      filters: {
+        fields: ['in', 'symbol', 'industry', 'pe_ttm', 'buy_pct', 'market_cap'],
+        default: [
+          { key: 'in', value: 'Holdings' },
+          { key: 'in', value: 'Watchlist' },
+        ],
+      },
+      sort: { key: 'market_value', desc: true },
+    }),
+  },
+  {
+    id: 'accounts',
+    app: true,
+    desk: 'trade',
+    domain: 'accounts',
+    owner: null,
+    name: 'Accounts',
+    config: customViewConfigSchema.parse({
+      shape: 'group',
+      columns: [
+        'account',
+        'brokerage',
+        'tax_type',
+        'trading',
+        'holdings',
+        'cash',
+        'market_value',
+        'unrealized',
+        'realized_ytd',
+      ],
+      chips: [{ key: 'tax_type', placement: 'column' }],
+      icon: 'landmark',
+      group: { fields: ['brokerage', 'tax_type', 'source', 'trading'], default: null },
+      filters: { fields: ['brokerage', 'tax_type', 'source', 'trading'], default: [] },
+    }),
+  },
+  {
     id: 'logs',
     app: true,
     desk: 'trade',
@@ -370,6 +479,13 @@ export const appViews: Omit<CustomView, 'created_at' | 'updated_at'>[] = [
  * Each domain's field keys, for agents writing views (custom_view_write's description). The desk
  * page that shows the domain defines the fields; keep this in step with it.
  */
+const SYMBOL_KEYS = SYMBOL_FIELDS.map((f) => f.key);
+const SYMBOL_CATEGORIES = SYMBOL_FIELDS.filter((f) => f.category).map((f) => f.key);
+const SYMBOL_NUMBERS = SYMBOL_FIELDS.filter((f) => f.format !== 'text').map((f) => f.key);
+/** Account fields a row looks up by its account (`account` and `tax_type` are listed by each domain). */
+const ACCOUNT_LOOKUPS = ['brokerage', 'trading', 'cash'];
+const ACCOUNT_GROUPS = ['brokerage', 'trading'];
+
 export const customViewFields: Record<
   string,
   { columns: string[]; group: string[]; filter: string[]; widgets?: string[] }
@@ -405,7 +521,9 @@ export const customViewFields: Record<
       'basket',
       'account',
       'tax_type',
+      ...ACCOUNT_LOOKUPS,
       'check',
+      ...SYMBOL_KEYS,
     ],
     group: [
       'underlying',
@@ -416,8 +534,29 @@ export const customViewFields: Record<
       'account',
       'tax_type',
       'status',
+      ...ACCOUNT_GROUPS,
+      ...SYMBOL_CATEGORIES,
     ],
-    filter: ['symbol', 'underlying', 'kind', 'sector', 'basket', 'account', 'tax_type', 'status'],
+    filter: [
+      'symbol',
+      'underlying',
+      'kind',
+      'sector',
+      'basket',
+      'account',
+      'tax_type',
+      'status',
+      'dividends',
+      'dividends_year',
+      'realized',
+      'realized_year',
+      'unrealized',
+      'market_value',
+      'cost_basis',
+      ...ACCOUNT_GROUPS,
+      ...SYMBOL_CATEGORIES,
+      ...SYMBOL_NUMBERS,
+    ],
     widgets: ['value', 'day_pnl', 'unrealized', 'realized_ytd', 'check'],
   },
   transactions: {
@@ -431,10 +570,21 @@ export const customViewFields: Record<
       'fees',
       'amount',
       'account',
+      'tax_type',
+      ...ACCOUNT_LOOKUPS,
       'source_id',
+      ...SYMBOL_KEYS,
     ],
-    group: ['action', 'underlying', 'account'],
-    filter: ['action', 'instrument', 'underlying', 'account'],
+    group: ['action', 'underlying', 'account', 'tax_type', ...ACCOUNT_GROUPS, ...SYMBOL_CATEGORIES],
+    filter: [
+      'action',
+      'instrument',
+      'underlying',
+      'account',
+      'tax_type',
+      ...ACCOUNT_GROUPS,
+      ...SYMBOL_CATEGORIES,
+    ],
   },
   tax_lots: {
     columns: [
@@ -455,10 +605,58 @@ export const customViewFields: Record<
       'source',
       'account',
       'tax_type',
+      ...ACCOUNT_LOOKUPS,
+      ...SYMBOL_KEYS,
     ],
-    group: ['underlying', 'status', 'year', 'source', 'term', 'account', 'tax_type'],
-    filter: ['symbol', 'underlying', 'status', 'year', 'source', 'term', 'account', 'tax_type'],
+    group: [
+      'underlying',
+      'status',
+      'year',
+      'source',
+      'term',
+      'account',
+      'tax_type',
+      ...ACCOUNT_GROUPS,
+      ...SYMBOL_CATEGORIES,
+    ],
+    filter: [
+      'symbol',
+      'underlying',
+      'status',
+      'year',
+      'source',
+      'term',
+      'account',
+      'tax_type',
+      ...ACCOUNT_GROUPS,
+      ...SYMBOL_CATEGORIES,
+    ],
     widgets: ['realized_ytd', 'realized_all'],
+  },
+  // One row per symbol you hold or watch, or in the DataEdge list (`in`): saved views are stock
+  // screens (Bikram, 2026-10-12).
+  symbols: {
+    columns: ['symbol', 'in', 'price', 'quantity', 'market_value', 'accounts', ...SYMBOL_KEYS],
+    group: ['in', ...SYMBOL_CATEGORIES],
+    filter: ['in', 'symbol', ...SYMBOL_CATEGORIES, ...SYMBOL_NUMBERS, 'market_value'],
+  },
+  accounts: {
+    columns: [
+      'account',
+      'brokerage',
+      'tax_type',
+      'source',
+      'trading',
+      'holdings',
+      'cash',
+      'cost_basis',
+      'market_value',
+      'unrealized',
+      'realized_ytd',
+      'as_of',
+    ],
+    group: ['brokerage', 'tax_type', 'source', 'trading'],
+    filter: ['account', 'brokerage', 'tax_type', 'source', 'trading', 'cash', 'market_value'],
   },
   logs: {
     columns: ['at', 'category', 'what', 'outcome', 'ms', 'detail'],

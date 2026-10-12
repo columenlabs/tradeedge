@@ -85,6 +85,25 @@ const portfolioTaxLots = createRoute({
   component: lazyRouteComponent(() => import('@/routes/portfolio'), 'TaxLotsPage'),
 });
 
+const portfolioAccounts = createRoute({
+  getParentRoute: () => root,
+  path: '/portfolio/accounts',
+  component: lazyRouteComponent(() => import('@/routes/portfolio'), 'AccountsPage'),
+});
+
+// Symbols (Bikram, 2026-10-12): stock screens, views over your symbols.
+const symbols = createRoute({
+  getParentRoute: () => root,
+  path: '/symbols',
+  component: lazyRouteComponent(() => import('@/routes/portfolio'), 'SymbolsPage'),
+});
+
+const symbolView = createRoute({
+  getParentRoute: () => root,
+  path: '/symbols/views/$id',
+  component: lazyRouteComponent(() => import('@/routes/portfolio'), 'SymbolViewPage'),
+});
+
 const portfolioView = createRoute({
   getParentRoute: () => root,
   path: '/portfolio/views/$domain/$id',
@@ -113,7 +132,10 @@ const routeTree = root.addChildren([
   portfolio,
   portfolioTransactions,
   portfolioTaxLots,
+  portfolioAccounts,
   portfolioView,
+  symbols,
+  symbolView,
   logs,
   logView,
 ]);

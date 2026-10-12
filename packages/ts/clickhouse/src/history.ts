@@ -13,6 +13,8 @@ import {
   fundNavsQuery,
   rawClosesQuery,
   snapshotDatesQuery,
+  symbolFactsQuery,
+  symbolListQuery,
   underlyingsQuery,
 } from './queries';
 
@@ -113,5 +115,36 @@ export class HistoryStore {
       firstExpiration: nOrNull(r.first_expiration),
       lastExpiration: nOrNull(r.last_expiration),
     }));
+  }
+
+  /** DataEdge symbol fields per symbol (field key → value), and the newest day any came from. */
+  async symbolFacts(
+    symbols: string[],
+    indicators: string[],
+  ): Promise<{ facts: Record<string, Record<string, number>>; asOf: string | null }> {
+    if (symbols.length === 0) return { facts: {}, asOf: null };
+    const rows = await this.ch.query<{
+      symbol: string;
+      field: string;
+      value: unknown;
+      date: string;
+    }>(symbolFactsQuery(symbols, indicators, this.ch.database));
+    const facts: Record<string, Record<string, number>> = {};
+    let asOf: string | null = null;
+    for (const r of rows) {
+      const v = Number(r.value);
+      if (!Number.isFinite(v)) continue;
+      const own = facts[r.symbol] ?? {};
+      own[r.field] = v;
+      facts[r.symbol] = own;
+      if (!asOf || r.date > asOf) asOf = r.date;
+    }
+    return { facts, asOf };
+  }
+
+  /** DataEdge's symbol list. */
+  async symbolList(): Promise<string[]> {
+    const rows = await this.ch.query<{ symbol: string }>(symbolListQuery(this.ch.database));
+    return rows.map((r) => r.symbol);
   }
 }

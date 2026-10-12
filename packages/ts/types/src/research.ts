@@ -6,7 +6,7 @@ import {
   type ViewToken,
   viewFilterSchema,
   viewGroupSchema,
-  viewIconNames,
+  viewIconSchema,
   viewPivotSchema,
   viewShapes,
 } from './views';
@@ -667,7 +667,7 @@ export const explorerLayoutSchema = z.object({
   /** How the view shows its rows (its sidebar icon); a read may ask for another. */
   shape: z.enum(viewShapes).default('table'),
   /** The sidebar icon a person picked; null = the shape's. */
-  icon: z.enum(viewIconNames).nullable().default(null),
+  icon: viewIconSchema.nullable().default(null),
   group: viewGroupSchema.prefault({}),
   pivot: viewPivotSchema.prefault({}),
   filters: viewFilterSchema.prefault({}),
@@ -689,7 +689,7 @@ export const explorerViewPatchSchema = z
     columns: z.array(explorerColumnSchema).min(1).max(EXPLORER_MAX_COLUMNS).optional(),
     params: z.array(explorerParamSchema).max(5).optional(),
     shape: z.enum(viewShapes).optional(),
-    icon: z.enum(viewIconNames).nullable().optional(),
+    icon: viewIconSchema.nullable().optional(),
     group: viewGroupSchema.optional(),
     pivot: viewPivotSchema.optional(),
     filters: viewFilterSchema.optional(),

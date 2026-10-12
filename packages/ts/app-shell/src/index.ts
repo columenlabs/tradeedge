@@ -10,10 +10,13 @@ export {
   type ViewCellValue,
   type ViewDomain,
   type ViewField,
+  type ViewFieldGroup,
+  FORMULAS_GROUP,
   ViewValueCell,
   rollUp,
 } from './custom-view';
 export { ConfirmDelete, type ConfirmDeleteProps } from './confirm';
+export { DrawerSection, type DrawerSectionProps } from './drawer-section';
 export { DESKS, type Desk, type DeskId } from './desks';
 export { SIGN_OUT_URL, type Identity, useIdentity } from './identity';
 export {

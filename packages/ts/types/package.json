@@ -15,7 +15,8 @@
     "./research-dates": "./src/research-dates.ts",
     "./log-stamp": "./src/log-stamp.ts",
     "./lab": "./src/lab.ts",
-    "./funds": "./src/funds.ts"
+    "./funds": "./src/funds.ts",
+    "./symbols": "./src/symbols.ts"
   },
   "dependencies": {
     "jexl": "2.3.0",

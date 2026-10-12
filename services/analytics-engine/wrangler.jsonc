@@ -21,7 +21,8 @@
 
   // Sign-in, origin and the Access audience are set per install (Appflare fills them in):
   // PUBLIC_ORIGIN, TRADEEDGE_HOST, ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_APP_AUD.
-  // Secrets: VAULT_KEK (32 random bytes, base64), ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY.
+  // Secrets: ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, and optional VAULT_KEK (32 random bytes,
+  // base64): set it to encrypt every person's rows; without it they are stored readable.
   "vars": {
     // prod refuses every signed-in route until the Access values are set.
     "EDGEDESK_ENV": "prod",
@@ -31,7 +32,7 @@
     "LIVE_CACHE_TTL_MS": "2000"
   },
 
-  // Every person's data, sealed with VAULT_KEK. Created on the first deploy.
+  // Every person's data, sealed with VAULT_KEK when it is set. Created on the first deploy.
   "d1_databases": [
     { "binding": "DB", "database_name": "tradeedge", "migrations_dir": "migrations" }
   ],

@@ -13,6 +13,16 @@ export interface ViewField<T> {
   label: string;
   icon: LucideIcon;
   value: (row: T) => ViewCellValue;
+  /**
+   * Where the field comes from (Bikram, 2026-10-12): one of the domain's `groups` (Holding, Symbol,
+   * Account). The editor's tree and the table's column-group headers follow it; formulas are their
+   * own group. Left out: the domain's first group.
+   */
+  group?: string;
+  /** The sub-heading within its group in the editor's tree (Valuation, Analysts, Technicals). */
+  topic?: string;
+  /** Every value a row has for filtering, when it has several (a symbol in Holdings and Watchlist). */
+  values?: (row: T) => string[];
   format: ViewFormat;
   /** How the value is made, shown under the field in the Edit dialog (Bikram, 2026-10-09). */
   formula?: string;
@@ -24,9 +34,15 @@ export interface ViewField<T> {
   note?: string;
   /**
    * Makes the cell editable (Bikram, 2026-10-09): a click picks a value in use or takes a new one,
-   * saved through `save`; `note` says what an edit covers for that row.
+   * saved through `save`; `note` says what an edit covers for that row. `options` lists every
+   * value the field has, in use or not, so the picker offers them whatever the filter shows
+   * (Bikram, 2026-10-12); without it the picker offers the values in the shown rows.
    */
-  edit?: { save: (row: T, value: string | null) => Promise<unknown>; note?: (row: T) => string };
+  edit?: {
+    save: (row: T, value: string | null) => Promise<unknown>;
+    note?: (row: T) => string;
+    options?: () => { inUse: string[]; unused: string[] };
+  };
   /** Offered as `field:value` tokens in the filter box. */
   filterable?: boolean;
   /** Offered in the Group switcher and as pivot rows or columns. */
@@ -55,10 +71,27 @@ export interface ViewField<T> {
   render?: (row: T) => ReactNode;
 }
 
+/** A group of fields by where they come from: their colour and, per topic, the source line. */
+export interface ViewFieldGroup {
+  id: string;
+  label: string;
+  /** A theme colour (`var(--chart-3)`) for the group's dot and column-group header. */
+  color?: string;
+  /** What the group's fields are looked up by, e.g. `by symbol · an option by its underlying`. */
+  note?: string;
+  /** Each topic's source, e.g. `Robinhood · live`. */
+  sources?: Record<string, string>;
+}
+
+/** The formulas group: a view's own formula columns. */
+export const FORMULAS_GROUP = '_formulas';
+
 /** A data domain: registered once, any desk can open views on it. */
 export interface ViewDomain<T> {
   id: string;
   fields: ViewField<T>[];
+  /** Field groups in order (Bikram, 2026-10-12); without them every field is one group. */
+  groups?: ViewFieldGroup[];
   /** A stable id per row (React keys, the details drawer). */
   rowKey: (row: T) => string;
   /** Free text the filter box matches besides field values (a name, an id). */
@@ -67,8 +100,18 @@ export interface ViewDomain<T> {
   formulas?: boolean;
   /** Summary tiles a view can show above its table, in the order offered (Bikram, 2026-10-09). */
   widgets?: { key: string; label: string; icon: LucideIcon }[];
-  /** The details drawer: collapsible sections, each with its icon. */
-  details?: { id: string; label: string; icon: LucideIcon; render: (row: T) => ReactNode }[];
+  /** The details drawer: collapsible sections (the shell's DrawerSection), each with its icon.
+   *  A section starts collapsed unless `open` says so; a function opens it only for rows it
+   *  holds something for (Bikram, 2026-10-12). `count` and `hint` fill the header's chip and note. */
+  details?: {
+    id: string;
+    label: string;
+    icon: LucideIcon;
+    open?: boolean | ((row: T) => boolean);
+    count?: (row: T) => number | null;
+    hint?: (row: T) => string | null;
+    render: (row: T) => ReactNode;
+  }[];
   /** While grouped, rows of one group sharing `key` show as one line, made by `rows` (Bikram, 2026-10-09). */
   merge?: { key: (row: T) => string; rows: (rows: T[]) => T };
   /** A folded row's own rows, shown as a table at the top of its details drawer, first column
@@ -107,6 +150,22 @@ export const pick = <T>(fields: ViewField<T>[], keys: string[]) =>
   keys.length
     ? keys.map((k) => fields.find((f) => f.key === k)).filter((f): f is ViewField<T> => !!f)
     : fields;
+
+/** A field the filter box can offer: one marked filterable, or any number field (Bikram, 2026-10-11). */
+export const canFilter = <T>(f: ViewField<T>) => !!f.filterable || f.format !== 'text';
+/** The fields a view's filter box offers: the ones it lists, else every field marked filterable. */
+export const filterFieldsOf = <T>(fields: ViewField<T>[], keys: string[]) =>
+  keys.length ? pick(fields.filter(canFilter), keys) : fields.filter((f) => f.filterable);
+/** A view's filters with `tokens` as the ones it opens with, offering every field they use. */
+export function withSavedFilters<T>(
+  fields: ViewField<T>[],
+  filters: CustomViewConfig['filters'],
+  tokens: CustomViewConfig['filters']['default'],
+): CustomViewConfig['filters'] {
+  const offered = filterFieldsOf(fields, filters.fields).map((f) => f.key);
+  const missing = [...new Set(tokens.map((t) => t.key))].filter((k) => !offered.includes(k));
+  return { fields: missing.length ? [...offered, ...missing] : filters.fields, default: tokens };
+}
 
 export const label = (v: ViewCellValue) => (v === null ? '—' : String(v));
 
@@ -196,3 +255,7 @@ export function computedOf<T>(domain: ViewDomain<T>, rows: T[], groupBy: ViewFie
 }
 
 export const num = (v: ViewCellValue) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+/** A field's group id: its own, else the domain's first group ('' when the domain has none). */
+export const groupOf = <T>(domain: ViewDomain<T>, f: ViewField<T>) =>
+  f.group ?? domain.groups?.[0]?.id ?? '';

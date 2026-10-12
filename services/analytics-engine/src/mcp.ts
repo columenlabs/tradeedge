@@ -31,6 +31,11 @@ import {
   strategyWriteShape,
 } from './desks/tradeedge/strategies';
 import {
+  type SymbolFactsService,
+  symbolFieldDocs,
+  symbolReadShape,
+} from './desks/tradeedge/symbols';
+import {
   type HoldingTags,
   basketWriteShape,
   sectorWriteShape,
@@ -89,6 +94,7 @@ export function buildMcpServer(
   if (mine?.trades) registerTradeTools(server, mine.trades, mine.owner);
   if (mine?.watchlist) registerWatchlistTools(server, mine.watchlist, mine.owner);
   if (mine?.tags) registerTagTools(server, mine.tags, mine.owner);
+  if (mine?.symbols) registerSymbolTools(server, mine.symbols, mine.owner);
   if (feedback) registerFeedbackTools(server, feedback.feedback, feedback.owner, 'trade');
   if (customViews) registerCustomViewTools(server, customViews.views, customViews.owner, 'trade');
   return server;
@@ -102,6 +108,27 @@ export interface McpMine {
   trades?: Trades;
   watchlist?: Watchlist;
   tags?: HoldingTags;
+  symbols?: SymbolFactsService;
+}
+
+const SYMBOL_READ_DOC =
+  'Facts about tickers that views show as symbol fields, by field key. Robinhood fields are ' +
+  "read live with the person's Robinhood sign-in (Settings > Integrations; without it they are " +
+  'missing and robinhood.state is not_connected), held five minutes, never saved; DataEdge ' +
+  'fields (trailing P/E history, technicals at the last close) come from market data. Funds ' +
+  'and ETFs have no P/E or analysts. earnings_next starting with ~ is a date not yet ' +
+  'confirmed. Up to 1000 symbols; an option is looked up by its underlying.';
+
+function registerSymbolTools(server: McpServer, symbols: SymbolFactsService, owner: string) {
+  server.registerTool(
+    'symbol_read',
+    {
+      title: 'Symbol fields',
+      description: `${SYMBOL_READ_DOC} Fields: ${symbolFieldDocs}.`,
+      inputSchema: symbolReadShape,
+    },
+    async (input) => json(await symbols.read(owner, input.symbols)),
+  );
 }
 
 function registerTagTools(server: McpServer, tags: HoldingTags, owner: string) {
@@ -347,19 +374,25 @@ function registerPortfolioTools(
         'option; quantity is shares or contracts, negative when short; avg_cost is per share in USD. ' +
         'lots are the open tax lots. Each holding takes its lots from one source, named on every ' +
         "lot as source: snaptrade (the broker's, synced), manual (portfolio_lot_write, manual " +
-        'accounts) or, when neither has lots for it, derived (first-in first-out from its buys and ' +
-        'sells). A lot is long or short as its holding is. A lot whose cost is not its own carries cost_from: yours ' +
+        'accounts) or, when neither has lots for it, derived (first-in first-out from its buys, ' +
+        'sells and transfers). A lot is long or short as its holding is. A lot whose cost is not its own carries cost_from: yours ' +
         "(portfolio_lot_cost_write), transaction (that day's transaction price), estimate (the close on " +
         'the acquired day, because the broker sent 0: set the exact cost with portfolio_lot_cost_write) ' +
         'or missing (cost 0, no price found). A position the broker sent without avg_cost takes its ' +
-        "lots' average (avg_cost_from lots). realized_ytd is this year's closed gain; closed_lots lists " +
-        'every lot closed so far (first-in first-out from the buys and sells: acquired, closed, quantity, cost, ' +
-        'proceeds, gain, term), the detail behind realized gains. checks lists holdings ' +
-        'whose lots do not add up to the held quantity (held, in_lots, and source, where their lots ' +
-        'come from); a stock sold out this year with more sold than bought on record shows as held 0 ' +
-        'and in_lots negative, its buy missing. dividends lists, per symbol, the dividends paid ' +
-        '(total on record, ytd this year). In a manual account, send the missing transactions (derived) or lots (manual); ' +
-        'in a SnapTrade account, run integration_sync. A MARGIN-CASH position is the margin ' +
+        "lots' average (avg_cost_from lots). realized_ytd is this year's closed gain, with sold (this " +
+        "year's proceeds) and no_cost (the proceeds whose gain is unknown, so the total is partial). " +
+        'closed_lots lists every lot closed so far (first-in first-out from the buys, sells and ' +
+        'transfers: acquired, closed, quantity, cost, proceeds, gain, term). Every share sits in one ' +
+        'lot: the rows of a stock are anchored to what is held now, and shares no row explains (bought ' +
+        'before the history starts) form one lot with before_history true, acquired on the first row. ' +
+        'cost and gain are null for shares with no cost on record (transferred in, or before the ' +
+        'history) until you set one with portfolio_lot_cost_write (that acquired day, no quantity). ' +
+        'Lots are first-in first-out: wash sales are not applied. checks, for every symbol held or ' +
+        'sold: kind quantity when the open lots do not add up to what is held (held, in_lots, source); ' +
+        'kind cost when no_cost shares, open or sold, have no cost on record. Money market funds ' +
+        '(FDRXX, SPAXX) are cash and have no lots. dividends lists, per symbol, the dividends paid ' +
+        '(total on record, ytd this year). For a quantity check in a manual account, send the missing ' +
+        'lots; in a SnapTrade account, run integration_sync. A MARGIN-CASH position is the margin ' +
         'borrowed in that account (quantity = minus the USD balance, priced at $1; see portfolio_write). ' +
         'Each position carries its sector (set ' +
         'with sector_write) and basket (set with basket_write), null when unset.',
@@ -491,8 +524,11 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
         'the consumer key masked, webhook_url (paste it into SnapTrade under Webhooks so changes ' +
         'sync at once), last_sync (counts, skipped positions, errors), last_event, and brokers read ' +
         'live from SnapTrade: each with broken (its login needs signing in again, in the app) and ' +
-        'its accounts: id, name, number, import (false = left out of Holdings), tax_type and ' +
-        'portfolio_id once synced. alpaca: connected and the key id masked.',
+        'its accounts: id, name, number, import (false = left out of Holdings), tax_type, ' +
+        'portfolio_id once synced, trading {via: snaptrade | robinhood | null (read-only), note} and ' +
+        'trade (the person lets TradeEdge send orders there; set in the app only). alpaca: connected and the key id masked. robinhood: connected ' +
+        '(signed in from the app, Settings > Integrations), connected_at and last_test: the Agentic ' +
+        "account masked and approvals (true = each order waits for the person's tap in Robinhood's app).",
       inputSchema: {},
     },
     async () => json(await integrations.status(owner)),
@@ -542,12 +578,14 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
       title: 'Disconnect an integration',
       description:
         'Delete your key for an integration. snaptrade: syncing stops; accounts already synced stay ' +
-        "in Holdings. alpaca: live data goes back to EdgeDesk's key.",
-      inputSchema: { provider: z.enum(['snaptrade', 'alpaca']) },
+        "in Holdings. alpaca: live data goes back to EdgeDesk's key. robinhood: its sign-in is " +
+        'deleted; connecting again is done in the app.',
+      inputSchema: { provider: z.enum(['snaptrade', 'alpaca', 'robinhood']) },
     },
     async ({ provider }) => {
       if (provider === 'snaptrade') await integrations.deleteSnapTrade(owner);
-      else await integrations.deleteAlpaca(owner);
+      else if (provider === 'alpaca') await integrations.deleteAlpaca(owner);
+      else await integrations.deleteRobinhood(owner);
       return json({ ok: true });
     },
   );
@@ -571,7 +609,8 @@ function registerIntegrationTools(server: McpServer, integrations: Integrations,
       description:
         'Include a SnapTrade account in Holdings or leave it out (import false also removes the ' +
         'synced account), and set its tax type (taxable or retirement; first guessed from the ' +
-        "account's name). account_id comes from integration_list. Returns integration_list.",
+        "account's name), or rename it (name; null goes back to the broker's name). account_id " +
+        'comes from integration_list. Returns integration_list.',
       inputSchema: snaptradeAccountShape,
     },
     async (input) => json(await integrations.setAccount(owner, input)),
@@ -595,6 +634,8 @@ export interface McpAuth {
   feedback?: Feedback;
   /** custom_view_* tools, scoped to the signed-in caller. Omitted → not registered. */
   customViews?: CustomViews;
+  /** symbol_read. Omitted → not registered. */
+  symbols?: SymbolFactsService;
 }
 
 export function mcpRoutes(market: MarketService, auth: McpAuth = {}, ctx?: OpContext) {
@@ -634,6 +675,7 @@ export function mcpRoutes(market: MarketService, auth: McpAuth = {}, ctx?: OpCon
       trades: auth.trades,
       watchlist: auth.watchlist,
       tags: auth.tags,
+      symbols: auth.symbols,
     };
     const feedback = auth.feedback
       ? { feedback: auth.feedback, owner: feedbackOwner(c.get('identity')) }

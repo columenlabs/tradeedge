@@ -16,11 +16,14 @@ import type { D1Like } from '../../d1';
 import type { HistoryService } from '../../history';
 import { type UserVault, type Vault, docWrite, withRetry } from '../../vault';
 import {
+  type AccountLots,
   type CloseOn,
   type ClosedLot,
   type Dividends,
   type LotCheck,
   type LotCost,
+  MOVES,
+  type StockSplit,
   type StoredLot,
   type TaxLot,
   accountLots,
@@ -120,7 +123,7 @@ export interface Portfolio extends Omit<PortfolioSummary, 'positions'> {
   /** Open tax lots, each with its `source` (`lots.ts`). */
   lots: TaxLot[];
   /** Gains closed this calendar year (trade dates), FIFO against the lots, fees included. */
-  realized_ytd: { total: number; short_term: number };
+  realized_ytd: AccountLots['realized_ytd'];
   /** Every lot closed so far, FIFO from the buys and sells, oldest close first; the realized gains in full. */
   closed_lots: ClosedLot[];
   /** Holdings whose open lots do not add up to the held quantity, with where their lots come from. */
@@ -141,7 +144,22 @@ const transactionSchema = z
       .max(120)
       .describe("The broker's id for this row. Sending the same id again updates it."),
     date: z.string().regex(ISO_DATE, 'YYYY-MM-DD').describe('Trade date (YYYY-MM-DD).'),
-    kind: z.enum(['buy', 'sell', 'dividend', 'interest', 'fee', 'deposit', 'withdrawal', 'other']),
+    kind: z
+      .enum([
+        'buy',
+        'sell',
+        'transfer_in',
+        'transfer_out',
+        'dividend',
+        'interest',
+        'fee',
+        'deposit',
+        'withdrawal',
+        'other',
+      ])
+      .describe(
+        'transfer_in / transfer_out: shares moved in from or out to another account, no sale (a broker transfer, a journal, a 401(k) fund exchange).',
+      ),
     underlying: z
       .string()
       .regex(/^[A-Za-z][A-Za-z0-9.^/-]{0,14}$/, 'ticker')
@@ -155,7 +173,7 @@ const transactionSchema = z
       .positive()
       .finite()
       .optional()
-      .describe('Buy and sell: shares or contracts, always positive.'),
+      .describe('Buy, sell and transfer: shares or contracts, always positive.'),
     price: z.number().finite().nonnegative().optional().describe('Buy and sell: per share, USD.'),
     fees: z.number().finite().nonnegative().default(0),
     amount: z
@@ -350,6 +368,7 @@ const full = (
   rows: Transaction[],
   stored: StoredLot[] | null,
   close: CloseOn = () => null,
+  splits: StockSplit[] = [],
 ): Portfolio => {
   const { lot_costs: costs = [], ...rest } = head;
   const math = accountLots({
@@ -360,6 +379,7 @@ const full = (
     costs,
     close,
     skip: MARGIN_CASH,
+    splits,
   });
   return {
     ...rest,
@@ -440,6 +460,8 @@ export class Portfolios {
     private readonly snaptradeBroker?: SnapTradeBrokerCheck,
     /** Prices lots a broker sent without a cost; without it (self-host, tests) they stay at 0. */
     private readonly history?: HistoryService,
+    /** Stock splits since a date (the live feed); without it derived lots are never split. */
+    private readonly splitsSince?: (symbols: string[], from: string) => Promise<StockSplit[]>,
   ) {}
 
   private async accounts(v: UserVault, id?: string) {
@@ -537,7 +559,8 @@ export class Portfolios {
   private async priced(
     input: [Parameters<typeof full>[0], Transaction[], StoredLot[] | null][],
   ): Promise<Portfolio[]> {
-    const first = input.map(([h, rows, stored]) => full(h, rows, stored));
+    const splits = await this.splitsOf(input.flatMap(([, rows]) => rows));
+    const first = input.map(([h, rows, stored]) => full(h, rows, stored, undefined, splits));
     const missing = first.flatMap((p) => p.lots.filter((l) => l.cost_from === 'missing'));
     if (!missing.length || !this.history?.available) return first;
     const dates = missing.map((l) => l.acquired).sort();
@@ -555,8 +578,28 @@ export class Portfolios {
     };
     return input.map(([h, rows, stored], i) =>
       first[i]?.lots.some((l) => l.cost_from === 'missing')
-        ? full(h, rows, stored, close)
+        ? full(h, rows, stored, close, splits)
         : (first[i] as Portfolio),
+    );
+  }
+
+  /** The splits of every stock bought or sold, since the first such trade (one feed call, cached). */
+  private async splitsOf(rows: Transaction[]): Promise<StockSplit[]> {
+    const stock = rows.filter(
+      (t) =>
+        MOVES.has(t.kind) &&
+        t.symbol &&
+        t.expiration === null &&
+        !t.right &&
+        !t.symbol.includes(' '),
+    );
+    if (!this.splitsSince || !stock.length) return [];
+    const from = stock.map((t) => t.date).sort()[0] as string;
+    return this.splitsSince([...new Set(stock.map((t) => t.symbol as string))], from).catch(
+      (err) => {
+        console.error('lot splits', err);
+        return [];
+      },
     );
   }
 
@@ -688,6 +731,15 @@ export class Portfolios {
           : [],
       ),
     );
+  }
+
+  /** Renames a synced account (Bikram, 2026-10-11): the person's own name, kept across syncs. */
+  async rename(owner: string, id: string, name: string): Promise<void> {
+    const v = await this.vault.for(owner);
+    if ((await this.accounts(v)).some((a) => a.name === name && a.id !== id))
+      throw new PortfolioInvalid('another account has that name');
+    const { id: _, ...stored } = await this.own(v, id);
+    await this.store(v, id, await v.index(`portfolio:${name}`), { ...stored, name });
   }
 
   /**

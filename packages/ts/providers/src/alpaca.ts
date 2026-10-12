@@ -21,6 +21,8 @@ import {
   type ChainQuery,
   type LiveOptionsProvider,
   ProviderError,
+  type Split,
+  type SplitLookup,
 } from './types';
 
 type FetchFn = (input: URL | string | Request, init?: RequestInit) => Promise<Response>;
@@ -87,7 +89,7 @@ export function envAlpacaConfig(env: Record<string, string | undefined>): Alpaca
   };
 }
 
-export class AlpacaClient implements LiveOptionsProvider, AssetLookup {
+export class AlpacaClient implements LiveOptionsProvider, AssetLookup, SplitLookup {
   private readonly dataUrl: string;
   private readonly tradingUrl: string;
   private readonly fetchImpl: FetchFn;
@@ -211,6 +213,35 @@ export class AlpacaClient implements LiveOptionsProvider, AssetLookup {
       }
     }
     return out;
+  }
+
+  async getSplits(symbols: string[], from: string): Promise<Split[]> {
+    type Raw = { symbol?: string; ex_date?: string; new_rate?: number; old_rate?: number };
+    const out: Split[] = [];
+    for (const list of chunks(symbols, 100)) {
+      let pageToken: string | undefined;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const body = await this.get<{
+          corporate_actions?: { forward_splits?: Raw[]; reverse_splits?: Raw[] };
+          next_page_token?: string | null;
+        }>(this.dataUrl, '/v1/corporate-actions', {
+          symbols: list.join(','),
+          types: 'forward_split,reverse_split',
+          start: from,
+          limit: '1000',
+          ...(pageToken ? { page_token: pageToken } : {}),
+        });
+        const ca = body.corporate_actions ?? {};
+        for (const r of [...(ca.forward_splits ?? []), ...(ca.reverse_splits ?? [])]) {
+          const ratio = (r.new_rate ?? 0) / (r.old_rate ?? 0);
+          if (r.symbol && r.ex_date && Number.isFinite(ratio) && ratio > 0 && ratio !== 1)
+            out.push({ symbol: r.symbol.toUpperCase(), date: r.ex_date.slice(0, 10), ratio });
+        }
+        if (!body.next_page_token) break;
+        pageToken = body.next_page_token;
+      }
+    }
+    return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   }
 
   async getAsset(symbol: string): Promise<AssetInfo | null> {

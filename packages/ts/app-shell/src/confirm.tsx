@@ -46,7 +46,7 @@ export function ConfirmDelete({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={onConfirm}>
+          <AlertDialogAction variant="destructive-confirm" onClick={onConfirm}>
             {action}
           </AlertDialogAction>
         </AlertDialogFooter>

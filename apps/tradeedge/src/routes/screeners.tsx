@@ -160,6 +160,7 @@ const screenDomain: ViewDomain<ScreenRow> = {
       id: 'trade',
       label: 'Trade',
       icon: Tag,
+      open: true,
       render: (r) => <TradeDetails row={r} />,
     },
   ],
@@ -187,6 +188,7 @@ const RESULTS: CustomViewConfig = {
   group: { fields: ['expiry'], default: null },
   filters: { fields: [], default: [] },
   pivot: null,
+  sort: null,
 };
 
 /** The trade's legs and a button that saves it to the Trades board. */

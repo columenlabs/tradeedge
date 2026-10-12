@@ -292,7 +292,7 @@ function TradeView({
             <Copy />
           </Button>
           <Button
-            variant="outline"
+            variant="destructive"
             size="icon-sm"
             aria-label="Delete trade"
             title="Delete trade"
@@ -409,7 +409,7 @@ function TradeView({
               Cancel
             </Button>
             <Button
-              variant="destructive"
+              variant="destructive-confirm"
               size="sm"
               disabled={remove.isPending}
               onClick={() => remove.mutate()}
@@ -882,7 +882,7 @@ function LegsCard({
                 <TableCell>
                   <ConfirmDelete title="Delete this leg?" onConfirm={() => onDelete(l)}>
                     <Button
-                      variant="ghost"
+                      variant="destructive"
                       size="icon-xs"
                       className={ed}
                       aria-label="Delete leg"

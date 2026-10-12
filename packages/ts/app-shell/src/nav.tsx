@@ -2,8 +2,8 @@
 // that may nest one level (chevron on the right, hidden in icon mode), and a section whose items a
 // person adds with `+` and removes with the trash icon. Every item carries an icon; section headers are bold caps without one.
 import { Link, useRouterState } from '@tanstack/react-router';
-import { ChevronRightIcon, type LucideIcon, PlusIcon, Trash2Icon } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { ChevronRightIcon, PlusIcon, Trash2Icon } from 'lucide-react';
+import type { ComponentType, ReactNode } from 'react';
 import { ConfirmDelete } from './confirm';
 import { cn } from './lib/utils';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
@@ -23,10 +23,13 @@ import {
   SidebarMenuSubItem,
 } from './ui/sidebar';
 
+/** A nav icon: a lucide icon, or a view's emoji drawn at icon size. */
+export type NavIcon = ComponentType<{ className?: string }>;
+
 export interface NavItem {
   title: string;
   to: string;
-  icon: LucideIcon;
+  icon: NavIcon;
   badge?: ReactNode;
   /** Active only on this exact path, not its children. */
   exact?: boolean;
@@ -110,7 +113,7 @@ export interface SectionItem {
   id: string;
   title: string;
   to: string;
-  icon: LucideIcon;
+  icon: NavIcon;
   /** A count or a value on the right (a % change); hidden while the remove icon shows. */
   badge?: ReactNode;
   /** One nested level, toggled by a chevron; the item itself still links. */

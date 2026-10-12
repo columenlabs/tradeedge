@@ -69,6 +69,8 @@ export interface StAccount {
 export interface StAuthorization {
   id?: string;
   name?: string;
+  /** `trade` when the person linked it with trading allowed, else `read`. */
+  type?: string;
   disabled?: boolean;
   disabled_date?: string | null;
   brokerage?: { name?: string; display_name?: string; slug?: string };
@@ -337,10 +339,42 @@ const KIND: Record<string, TransactionInput['kind']> = {
   CONTRIBUTION: 'deposit',
   WITHDRAWAL: 'withdrawal',
 };
+/** Rows that move shares without a sale: a broker transfer, a journal, a 401(k) fund exchange. */
+const MOVE = /TRANSFER|JOURNAL|EXCHANGE/;
+
+/** A move's direction in its text: tastytrade sends "Removed 220.0 Short VOO via ACAT" with +220 units. */
+const MOVE_OUT = /\b(removed|delivered|deliver|transferred to)\b/i;
+const MOVE_IN = /\b(received|transferred from)\b/i;
+/** A 401(k) contribution comes as a TRANSFER into the plan fund at its price: a purchase. */
+const CONTRIBUTION = /^contribution$/i;
 
 /**
- * SnapTrade activities → transactions. Types without a kind of their own (option expiry, assignment,
- * split, transfer, …) come in as `other` with the broker's description, so nothing is dropped.
+ * A row's kind (Bikram, 2026-10-12: audit of the #318 transfers). A move goes in or out by its
+ * type's ending, else by the words of its text, else by the sign of its units.
+ */
+function kindOf(
+  type: string | null | undefined,
+  units: number | null | undefined,
+  description: string | null | undefined,
+  price: number | null | undefined,
+): TransactionInput['kind'] {
+  const t = (type ?? '').toUpperCase();
+  const known = KIND[t];
+  if (known) return known;
+  if (!MOVE.test(t)) return 'other';
+  const text = description ?? '';
+  if (CONTRIBUTION.test(text.trim()) && (price ?? 0) > 0) return 'buy';
+  if (t.endsWith('OUT')) return 'transfer_out';
+  if (t.endsWith('IN')) return 'transfer_in';
+  if (MOVE_OUT.test(text)) return 'transfer_out';
+  if (MOVE_IN.test(text)) return 'transfer_in';
+  return (units ?? 0) < 0 ? 'transfer_out' : 'transfer_in';
+}
+
+/**
+ * SnapTrade activities → transactions. Transfers, journals and exchanges come in as transfer_in or
+ * transfer_out; other types without a kind of their own (option expiry, assignment, …) come in as
+ * `other` with the broker's description, so nothing is dropped.
  */
 export function mapActivities(rows: StActivity[]): TransactionInput[] {
   const out: TransactionInput[] = [];
@@ -357,7 +391,7 @@ export function mapActivities(rows: StActivity[]): TransactionInput[] {
       amount: a.amount ?? 0,
       description: a.description?.slice(0, 200) || (a.type ?? undefined),
     };
-    const kind = KIND[(a.type ?? '').toUpperCase()] ?? 'other';
+    const kind = kindOf(a.type, a.units, a.description, a.price);
     const full: TransactionInput = {
       ...base,
       kind,

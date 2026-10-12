@@ -3,6 +3,8 @@
  * `columenlabs/tradeedge` (see wrangler.trade.jsonc and export/tradeedge/). Same tradeedge
  * code as the suite (`desks/tradeedge/app.ts`), on whatever host it is installed at, with plain
  * Worker secrets instead of the Secrets Store. No history chains (no ClickHouse), no agent feedback.
+ * Encryption is the installer's choice (Bikram, 2026-10-12): without VAULT_KEK rows are stored
+ * readable; once a key is set, the first start seals them (src/vault.ts `sealPlainRows`).
  *
  *   /           opens the app (/app/)
  *   /app        the SPA, signed in
@@ -29,6 +31,7 @@ import { MarketService } from './market';
 import type { RateLimiter } from './ratelimit';
 import { cacheApi } from './shared-cache';
 import { type AssetsFetcher, siteStatic } from './static-worker';
+import { sealPlainRows } from './vault';
 
 type Env = Record<string, string | AssetsFetcher | RateLimiter | D1Like | undefined> & {
   ASSETS: AssetsFetcher;
@@ -39,7 +42,7 @@ type Env = Record<string, string | AssetsFetcher | RateLimiter | D1Like | undefi
 
 let appPromise: Promise<Hono<AppEnv>> | undefined;
 
-function createTradeApp(env: Env) {
+async function createTradeApp(env: Env) {
   const vars: Record<string, string | undefined> = {};
   for (const [k, v] of Object.entries(env)) if (typeof v === 'string') vars[k] = v;
   const cfg = loadConfig(vars);
@@ -53,8 +56,9 @@ function createTradeApp(env: Env) {
   );
   const deps = {
     limiters: { api: env.API_RATE_LIMITER, mcp: env.MCP_RATE_LIMITER },
-    ...tradeedgeStores(cfg, env.DB, market),
+    ...tradeedgeStores(cfg, env.DB, market, undefined, true),
   };
+  if (env.DB && deps.vault) await sealPlainRows(env.DB, deps.vault);
 
   const app = new Hono<AppEnv>({ getPath: routePath });
   handleErrors(app);
@@ -89,7 +93,7 @@ function createTradeApp(env: Env) {
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    appPromise ??= Promise.resolve().then(() => createTradeApp(env));
+    appPromise ??= createTradeApp(env);
     // Don't pin a failed init for the isolate's lifetime.
     appPromise.catch(() => {
       appPromise = undefined;

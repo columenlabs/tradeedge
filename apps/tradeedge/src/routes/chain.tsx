@@ -71,7 +71,7 @@ export function ChainPage() {
               onConfirm={() => unwatch.mutate()}
             >
               <Button
-                variant="outline"
+                variant="destructive"
                 size="icon-sm"
                 aria-label={`Remove ${symbol} from watchlist`}
                 title={`Remove ${symbol} from watchlist`}

@@ -2,6 +2,7 @@ import { Tile } from '@/components/ticker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
@@ -15,6 +16,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   type ClosedLot,
+  type LotCheck,
   type LotSource,
   type Portfolio,
   type PortfolioDomain,
@@ -24,6 +26,7 @@ import {
   type TaxLot,
   type Transaction,
   allTransactionsQuery,
+  dataedgeSymbolsQuery,
   deletePortfolioView,
   holdingsAccountsQuery,
   portfolioViewPath,
@@ -32,9 +35,12 @@ import {
   savePortfolioView,
   tagsQuery,
   transactionsQuery,
+  watchlistQuery,
   writeBasket,
+  writeLotCost,
   writeSectors,
 } from '@/lib/api';
+import { todayPT } from '@/lib/calendar';
 import {
   DASH,
   expLabel,
@@ -60,6 +66,7 @@ import {
   useShell,
 } from '@edgedesk/app-shell';
 import type { OptionQuote } from '@edgedesk/types';
+import type { SymbolFacts } from '@edgedesk/types/symbols';
 import { appView } from '@edgedesk/types/views';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
@@ -68,6 +75,7 @@ import {
   Banknote,
   Briefcase,
   CalendarDays,
+  Check,
   CircleAlert,
   CircleDollarSign,
   Copy,
@@ -75,21 +83,38 @@ import {
   Hash,
   Landmark,
   Layers,
+  Pencil,
   Percent,
   Plug,
   Sigma,
   Tag,
   Tags,
   TrendingUp,
+  X,
 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorNote } from './chain';
+import {
+  ACCOUNT_GROUP,
+  SYMBOL_GROUP,
+  SymbolStatus,
+  accountFields,
+  brokerageOf,
+  inAccountGroup,
+  rowGroup,
+  symbolFields,
+  useSymbolFacts,
+  useTrading,
+  usesSymbolFields,
+  usesTrading,
+} from './lookups';
 
 /** One position, with the account it sits in and, for shares, the live price and day change. */
 interface Holding extends Position {
   key: string;
   account: Portfolio;
-  kind: 'Shares' | 'Option';
+  /** Cash: the account's cash balance as a line, priced $1 (Bikram, 2026-10-12). */
+  kind: 'Shares' | 'Option' | 'Cash';
   /** Live price: last for shares, mid for an option. */
   last: number | null;
   /** Today's change per share; shares only. */
@@ -100,19 +125,20 @@ interface Holding extends Position {
   sector: string | null;
   /** The holding's basket: its account's own, else the one set for every account. */
   basket: string | null;
-  /** The account's lot check for this symbol, when its lots miss the held quantity. */
-  check: Portfolio['checks'][number] | null;
+  /** The account's lot checks for this symbol: lots that miss what is held, shares with no cost. */
+  checks: LotCheck[];
   /** The one-account holdings this line folds together when grouped; empty for a single account. */
   parts: Holding[];
   /** Sold out this year: no shares left, kept for its realized gain and dividends. */
   closed: boolean;
 }
 
-const mult = (h: Holding) => (h.kind === 'Shares' ? 1 : 100);
+const mult = (h: Holding) => (h.kind === 'Option' ? 100 : 1);
 const basis = (h: Holding) => (h.avg_cost === null ? null : h.avg_cost * h.quantity * mult(h));
-const value = (h: Holding) => (h.last === null ? null : h.last * h.quantity * mult(h));
+const value = (h: Holding) => (h.last === null || h.closed ? null : h.last * h.quantity * mult(h));
 /** A per-share greek for the whole position: × 100 × contracts. Shares carry delta 1 each. */
 const greek = (h: Holding, g: 'delta' | 'gamma' | 'theta' | 'vega') => {
+  if (h.kind === 'Cash') return null;
   if (h.kind === 'Shares') return g === 'delta' ? h.quantity : null;
   const v = h.option?.[g];
   return v === null || v === undefined ? null : v * 100 * h.quantity;
@@ -137,7 +163,6 @@ function consolidate(parts: Holding[]): Holding {
   const quantity = parts.reduce((s, h) => s + h.quantity, 0);
   const bases = parts.map(basis);
   const total = bases.every((b) => b !== null) ? bases.reduce((s, b) => s + (b ?? 0), 0) : null;
-  const checks = parts.flatMap((h) => (h.check ? [h.check] : []));
   return {
     ...first,
     key: `merged:${parts.map((h) => h.key).join(',')}`,
@@ -145,13 +170,7 @@ function consolidate(parts: Holding[]): Holding {
     // A basket shows on the folded line only where every account agrees.
     basket: parts.every((h) => h.basket === first.basket) ? first.basket : null,
     avg_cost: total === null || quantity === 0 ? null : total / (quantity * mult(first)),
-    check: checks.length
-      ? {
-          ...(checks[0] as Portfolio['checks'][number]),
-          held: checks.reduce((s, c) => s + c.held, 0),
-          in_lots: checks.reduce((s, c) => s + c.in_lots, 0),
-        }
-      : null,
+    checks: parts.flatMap((h) => h.checks),
     parts,
     closed: parts.every((h) => h.closed),
   };
@@ -166,7 +185,7 @@ const realized = (h: Holding, year?: string) =>
       s +
       p.account.closed_lots
         .filter((c) => c.symbol === p.symbol && (!year || c.closed.startsWith(year)))
-        .reduce((t, c) => t + c.gain, 0),
+        .reduce((t, c) => t + (c.gain ?? 0), 0),
     0,
   );
 /** Dividends this holding paid across the accounts it folds; `ytd` keeps this year's. Shares only. */
@@ -177,8 +196,15 @@ const dividends = (h: Holding, ytd?: boolean) =>
         const d = p.account.dividends?.find((x) => x.symbol === p.symbol);
         return s + (d ? (ytd ? d.ytd : d.total) : 0);
       }, 0);
-const checkNote = (c: Portfolio['checks'][number]) =>
-  `lots ${num(c.in_lots, c.in_lots % 1 ? 4 : 0)} ≠ held ${num(c.held, c.held % 1 ? 4 : 0)}`;
+const qty = (v: number) => num(v, v % 1 ? 4 : 0);
+/** A check in a few words: lots against held, or the shares with no cost. */
+const checkNote = (c: LotCheck) =>
+  c.kind === 'quantity'
+    ? `lots ${qty(c.in_lots)} ≠ held ${qty(c.held)}`
+    : `${qty(c.no_cost)} shares with no cost`;
+/** The red check first: lots that miss what is held. */
+const firstCheck = (checks: LotCheck[]) =>
+  checks.find((c) => c.kind === 'quantity') ?? checks[0] ?? null;
 
 const HOLDINGS_BASE: ViewDomain<Holding> = {
   id: 'holdings',
@@ -458,10 +484,13 @@ const HOLDINGS_BASE: ViewDomain<Holding> = {
       key: 'check',
       label: 'Data check',
       icon: CircleAlert,
-      value: (h) => (h.check ? checkNote(h.check) : null),
+      value: (h) => {
+        const c = firstCheck(h.checks);
+        return c ? checkNote(c) : null;
+      },
       format: 'text',
       amount: true,
-      formula: 'lots bought (FIFO) vs quantity held',
+      formula: 'open lots vs quantity held, then shares (open or sold) with no cost',
     },
   ],
   widgets: [
@@ -471,23 +500,33 @@ const HOLDINGS_BASE: ViewDomain<Holding> = {
     { key: 'realized_ytd', label: 'Realized YTD', icon: CircleDollarSign },
     { key: 'check', label: 'Data check', icon: CircleAlert },
   ],
+  // Summary, Data check, Tax lots, Transactions (Bikram, 2026-10-12): the accounts sit in Summary.
   details: [
+    {
+      id: 'summary',
+      label: 'Summary',
+      icon: Tag,
+      open: true,
+      render: (h) => <SummaryDetails holding={h} />,
+    },
     {
       id: 'check',
       label: 'Data check',
       icon: CircleAlert,
+      open: (h) => h.checks.length > 0,
+      hint: (h) =>
+        h.checks.some((c) => c.kind === 'quantity')
+          ? 'mismatch'
+          : h.checks.length
+            ? 'needs a cost'
+            : null,
       render: (h) => <CheckDetails holding={h} />,
-    },
-    {
-      id: 'position',
-      label: 'Position',
-      icon: Tag,
-      render: (h) => <PositionDetails holding={h} />,
     },
     {
       id: 'lots',
       label: 'Tax lots',
       icon: Layers,
+      open: true,
       render: (h) => <LotDetails holding={h} />,
     },
     {
@@ -495,12 +534,6 @@ const HOLDINGS_BASE: ViewDomain<Holding> = {
       label: 'Transactions',
       icon: ArrowLeftRight,
       render: (h) => <TransactionDetails holding={h} />,
-    },
-    {
-      id: 'account',
-      label: 'Account',
-      icon: Briefcase,
-      render: (h) => <AccountDetails holding={h} />,
     },
   ],
   merge: { key: (h) => h.symbol, rows: consolidate },
@@ -518,8 +551,26 @@ function tagsOf(set: TagSet | undefined, p: { symbol: string; underlying: string
  * Holdings with Sector and Basket before Account, edited in place (Bikram, 2026-10-09): a sector
  * belongs to the ticker, a basket to the holding (a folded line sets every account it folds).
  */
-function holdingsDomain(saved: (set: TagSet) => void): ViewDomain<Holding> {
+function holdingsDomain(
+  saved: (set: TagSet) => void,
+  known: () => { rows: Holding[]; set: TagSet | undefined },
+  facts: Record<string, SymbolFacts>,
+  trading: Map<string, string>,
+): ViewDomain<Holding> {
   const at = HOLDINGS_BASE.fields.findIndex((f) => f.key === 'account');
+  // Every sector or basket that exists, whatever the filter shows (Bikram, 2026-10-12): in use
+  // when an open holding has it, else unused.
+  const choices = (value: (h: Holding) => string | null, all: (set?: TagSet) => string[]) => () => {
+    const { rows, set } = known();
+    const used = new Set(
+      rows
+        .filter((h) => !h.closed)
+        .map(value)
+        .filter((v): v is string => !!v),
+    );
+    const sorted = (vs: Iterable<string>) => [...new Set(vs)].sort();
+    return { inUse: sorted(used), unused: sorted(all(set).filter((v) => !used.has(v))) };
+  };
   const tags: ViewField<Holding>[] = [
     {
       key: 'sector',
@@ -533,6 +584,10 @@ function holdingsDomain(saved: (set: TagSet) => void): ViewDomain<Holding> {
       edit: {
         save: (h, v) => writeSectors({ [h.underlying]: v }).then(saved),
         note: (h) => `Sets every ${h.underlying} holding, options included.`,
+        options: choices(
+          (h) => h.sector,
+          (set) => Object.values(set?.sectors ?? {}),
+        ),
       },
     },
     {
@@ -552,6 +607,10 @@ function holdingsDomain(saved: (set: TagSet) => void): ViewDomain<Holding> {
             set = await writeBasket({ basket: v, symbols: [h.symbol], portfolio_id: p.account.id });
           if (set) saved(set);
         },
+        options: choices(
+          (h) => h.basket,
+          (set) => (set?.baskets ?? []).map((b) => b.basket),
+        ),
         note: (h) =>
           h.parts.length > 1
             ? `Sets ${holdingLabel(h)} in ${h.parts.length} accounts.`
@@ -559,9 +618,19 @@ function holdingsDomain(saved: (set: TagSet) => void): ViewDomain<Holding> {
       },
     },
   ];
+  // Holding, Symbol and Account fields (Bikram, 2026-10-12): an option looks up its underlying.
   return {
     ...HOLDINGS_BASE,
-    fields: [...HOLDINGS_BASE.fields.slice(0, at), ...tags, ...HOLDINGS_BASE.fields.slice(at)],
+    groups: [rowGroup('Holding'), SYMBOL_GROUP, ACCOUNT_GROUP],
+    fields: [
+      ...inAccountGroup([
+        ...HOLDINGS_BASE.fields.slice(0, at),
+        ...tags,
+        ...HOLDINGS_BASE.fields.slice(at),
+      ]),
+      ...accountFields((h: Holding) => partsOf(h).map((p) => p.account), trading),
+      ...symbolFields((h: Holding) => (h.kind === 'Cash' ? null : h.underlying), facts),
+    ],
   };
 }
 
@@ -573,6 +642,8 @@ interface Activity extends Transaction {
 const ACTION: Record<string, string> = {
   buy: 'Buy',
   sell: 'Sell',
+  transfer_in: 'Transfer in',
+  transfer_out: 'Transfer out',
   dividend: 'Dividend',
   interest: 'Interest',
   fee: 'Fee',
@@ -588,7 +659,7 @@ const instrument = (t: Transaction) =>
       )
     : (t.symbol ?? null);
 
-const TRANSACTIONS: ViewDomain<Activity> = {
+const TRANSACTIONS_BASE: ViewDomain<Activity> = {
   id: 'transactions',
   formulas: true,
   rowKey: (t) => `${t.account.id}:${t.id}`,
@@ -674,6 +745,30 @@ const TRANSACTIONS: ViewDomain<Activity> = {
   ],
 };
 
+/** Transactions with their Account and Symbol fields (Bikram, 2026-10-12). */
+const transactionsDomain = (
+  facts: Record<string, SymbolFacts>,
+  trading: Map<string, string>,
+): ViewDomain<Activity> => ({
+  ...TRANSACTIONS_BASE,
+  groups: [rowGroup('Transaction'), SYMBOL_GROUP, ACCOUNT_GROUP],
+  fields: [
+    ...inAccountGroup(TRANSACTIONS_BASE.fields),
+    {
+      key: 'tax_type',
+      label: 'Tax type',
+      icon: Landmark,
+      group: ACCOUNT_GROUP.id,
+      value: (t) => taxLabel(t.account),
+      format: 'text',
+      filterable: true,
+      groupable: true,
+    },
+    ...accountFields((t: Activity) => [t.account], trading),
+    ...symbolFields((t: Activity) => t.underlying ?? t.symbol, facts),
+  ],
+});
+
 /** Open or closed, on a holding or a lot (Bikram, 2026-10-11): one word in every view. */
 type Status = 'open' | 'closed';
 const STATUS = { open: 'Open', closed: 'Closed' } as const;
@@ -718,16 +813,19 @@ interface LotRow {
   closed: string | null;
   /** Shares or contracts, negative for a short lot. */
   quantity: number;
-  cost: number;
+  /** null for shares transferred in, whose cost the broker never sent. */
+  cost: number | null;
   /** What a closed lot sold for, per share (a short lot: what it opened at). */
   sell: number | null;
-  basis: number;
+  basis: number | null;
   proceeds: number | null;
   gain: number | null;
   term: TaxLot['term'];
   source: LotSource;
   /** The open lot itself, for its cost chip. */
   lot: TaxLot | null;
+  /** Shares held before the history starts: no buy on record. */
+  before: boolean;
 }
 
 const OCC = /\d{6}[CP]\d{8}$/;
@@ -756,6 +854,7 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
         term: l.term,
         source: l.source,
         lot: l,
+        before: l.before_history === true,
       };
     }),
     ...(a.closed_lots ?? []).map((c, i): LotRow => {
@@ -770,7 +869,7 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
         acquired: c.acquired,
         closed: c.closed,
         quantity: c.quantity,
-        cost: size ? c.cost / size : 0,
+        cost: c.cost === null ? null : size ? c.cost / size : 0,
         sell: size ? c.proceeds / size : null,
         basis: c.cost,
         proceeds: c.proceeds,
@@ -778,6 +877,7 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
         term: c.term,
         source: 'derived',
         lot: null,
+        before: c.before_history === true,
       };
     }),
   ]);
@@ -787,12 +887,12 @@ function lotRows(accounts: Portfolio[]): LotRow[] {
 const SOURCE = { snaptrade: 'SnapTrade', derived: 'Derived', manual: 'Manual' } as const;
 const sourceTip = (l: { source: LotSource; status?: Status }) =>
   l.status === 'closed'
-    ? "Worked out first in first out from this account's buys and sells: brokers send no closed lots, so every closed lot is derived."
+    ? "Worked out first in first out from this account's buys, sells and transfers: brokers send no closed lots, so every closed lot is derived. Shares transferred in come with no cost, so their gain is unknown and left out of Realized."
     : l.source === 'snaptrade'
       ? "The broker's own lot, synced from SnapTrade (its Tax lots add-on)."
       : l.source === 'manual'
         ? 'Entered for this manual account (in the app, or by an agent with portfolio_lot_write).'
-        : "Worked out first in first out from this account's buys and sells, because neither the broker nor you set lots for this holding. Transfers in or out are not counted, so it can differ from the broker's lots.";
+        : "Worked out first in first out from this account's buys, sells and transfers, because neither the broker nor you set lots for this holding. Shares transferred in come with no cost.";
 
 /** The source chip with its tooltip. */
 function SourceChip({ lot }: { lot: { source: LotSource; status?: Status } }) {
@@ -806,7 +906,7 @@ const closedLabel = (l: ClosedLot) =>
 const TERM = { short: 'Short', long: 'Long' } as const;
 
 /** Tax lots (Bikram, 2026-10-11): every lot of every account, open and closed, each with its source. */
-const TAX_LOTS: ViewDomain<LotRow> = {
+const TAX_LOTS_BASE: ViewDomain<LotRow> = {
   id: 'tax_lots',
   formulas: true,
   rowKey: (l) => l.key,
@@ -883,7 +983,7 @@ const TAX_LOTS: ViewDomain<LotRow> = {
       value: (l) => l.cost,
       format: 'price',
       formula: 'per share, fees included (a short lot: what it was bought back at)',
-      render: (l) => (l.lot ? <LotCost lot={l.lot} /> : num(l.cost)),
+      render: (l) => (l.lot ? <LotCost lot={l.lot} /> : l.cost === null ? DASH : num(l.cost)),
     },
     {
       key: 'sell_price',
@@ -986,6 +1086,20 @@ const TAX_LOTS: ViewDomain<LotRow> = {
   ],
 };
 
+/** Tax lots with their Account and Symbol fields (Bikram, 2026-10-12). */
+const taxLotsDomain = (
+  facts: Record<string, SymbolFacts>,
+  trading: Map<string, string>,
+): ViewDomain<LotRow> => ({
+  ...TAX_LOTS_BASE,
+  groups: [rowGroup('Lot'), SYMBOL_GROUP, ACCOUNT_GROUP],
+  fields: [
+    ...inAccountGroup(TAX_LOTS_BASE.fields),
+    ...accountFields((l: LotRow) => [l.account], trading),
+    ...symbolFields((l: LotRow) => l.underlying, facts),
+  ],
+});
+
 /** The Tax lots widgets over the shown closed lots: this year's gain and every gain shown. */
 function lotsWidget(key: string, shown: LotRow[], hidden: boolean): ReactNode {
   const m = (text: string) => (hidden ? maskAmount(text) : text);
@@ -1037,13 +1151,19 @@ function showsLive(config: CustomViewConfig): boolean {
 }
 
 /** The symbol a holding is priced by: the OCC symbol for an option, the ticker for shares. */
+/** The line an account's cash balance shows as; not upper case, so it never meets a ticker. */
+const CASH = 'Cash';
 const priceSymbol = (p: { right?: unknown; symbol: string; underlying: string }) =>
   p.right ? p.symbol : p.underlying;
+
+/** An option past its expiration: no feed quotes it, so it stays unpriced. */
+const expired = (p: Position) => p.expiration !== null && p.expiration < todayPT();
 
 /**
  * Every account the signed-in person has, its positions as holdings, and live share and option
  * prices for the rows the view shows only (Bikram, 2026-10-09): `setShown` takes those rows, and
  * prices load only when `live`. Shares by ticker, options by OCC symbol, in one batch request.
+ * Closed rows are priced too, so a sold-out symbol keeps its price (Bikram, 2026-10-12).
  */
 function useHoldings(live: boolean) {
   const list = useQuery(holdingsAccountsQuery());
@@ -1057,7 +1177,7 @@ function useHoldings(live: boolean) {
           ...new Set(
             rows.flatMap((h) =>
               partsOf(h)
-                .filter((p) => !p.closed)
+                .filter((p) => p.kind !== 'Cash' && !expired(p))
                 .map(priceSymbol),
             ),
           ),
@@ -1078,14 +1198,15 @@ function useHoldings(live: boolean) {
   const liveKey = quotes.dataUpdatedAt;
   const tags = useQuery(tagsQuery());
   const tagsKey = tags.dataUpdatedAt;
-  const accountsKey = accounts.map((a) => a.updated_at).join(',');
+  // Every fetch counts, not only a changed updated_at: a cost you set changes lots, not the account.
+  const accountsKey = `${list.dataUpdatedAt}:${accounts.map((a) => a.updated_at).join(',')}`;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on loaded accounts and prices
   const rows = useMemo<Holding[]>(
     () =>
       accounts.flatMap((a) => {
         const row = (p: Position, closed: boolean): Holding => {
-          const q = closed ? null : (priced[priceSymbol(p)] ?? null);
+          const q = priced[priceSymbol(p)] ?? null;
           const option = p.right && q && 'mid' in q ? q : null;
           const stock = !p.right && q && !('mid' in q) ? q : null;
           return {
@@ -1097,12 +1218,40 @@ function useHoldings(live: boolean) {
             change: stock?.change ?? null,
             option,
             ...tagsOf(tags.data, p, a.id),
-            check: a.checks.find((c) => c.symbol === p.symbol) ?? null,
+            checks: a.checks.filter((c) => c.symbol === p.symbol),
             parts: [],
             closed,
           };
         };
-        return [...a.positions.map((p) => row(p, false)), ...soldOut(a).map((p) => row(p, true))];
+        // The account's cash as its own line, so an all-cash account still shows what it holds.
+        const cash: Holding[] = a.cash
+          ? [
+              {
+                symbol: CASH,
+                underlying: CASH,
+                expiration: null,
+                strike: null,
+                right: null,
+                quantity: a.cash,
+                avg_cost: 1,
+                key: `${a.id}:${CASH}`,
+                account: a,
+                kind: 'Cash',
+                last: 1,
+                change: 0,
+                option: null,
+                ...tagsOf(tags.data, { symbol: CASH, underlying: CASH }, a.id),
+                checks: [],
+                parts: [],
+                closed: false,
+              },
+            ]
+          : [];
+        return [
+          ...a.positions.map((p) => row(p, false)),
+          ...cash,
+          ...soldOut(a).map((p) => row(p, true)),
+        ];
       }),
     [accountsKey, liveKey, tagsKey],
   );
@@ -1112,8 +1261,8 @@ function useHoldings(live: boolean) {
 }
 
 /**
- * What an account sold out of this year (Bikram, 2026-10-11): a closed lot this year, or a sell with
- * no buy on record (its check), and nothing held now. Each is a zero-quantity position.
+ * What an account sold out of this year (Bikram, 2026-10-11): a closed lot this year and nothing held
+ * now. Each is a zero-quantity position.
  */
 function soldOut(a: Portfolio): Position[] {
   const year = String(new Date().getFullYear());
@@ -1122,17 +1271,6 @@ function soldOut(a: Portfolio): Position[] {
   for (const c of a.closed_lots)
     if (c.closed.startsWith(year) && !held.has(c.symbol))
       out.set(c.symbol, { ...c, quantity: 0, avg_cost: null });
-  for (const c of a.checks)
-    if (c.held === 0 && !held.has(c.symbol) && !out.has(c.symbol))
-      out.set(c.symbol, {
-        symbol: c.symbol,
-        underlying: c.symbol,
-        expiration: null,
-        strike: null,
-        right: null,
-        quantity: 0,
-        avg_cost: null,
-      });
   return [...out.values()].map(
     ({ symbol, underlying, expiration, strike, right, quantity, avg_cost }) => ({
       symbol,
@@ -1227,15 +1365,21 @@ function holdingsWidgets(
   hidden: boolean,
 ): Record<string, ReactNode> {
   const m = (text: string) => (hidden ? maskAmount(text) : text);
-  const cash = accounts.reduce((s, a) => s + a.cash, 0);
   const sum = (f: (h: Holding) => number | null) => rows.reduce((s, h) => s + (f(h) ?? 0), 0);
-  const shares = sum(value);
+  const cash = sum((h) => (h.kind === 'Cash' ? h.quantity : null));
+  const shares = sum((h) => (h.kind === 'Cash' ? null : value(h)));
   const day = sum((h) => (h.change === null ? null : h.change * h.quantity));
   const before = shares - day;
   const unpriced = rows.some((h) => h.last === null && !h.closed);
   const realized = accounts.reduce((s, a) => s + a.realized_ytd.total, 0);
   const shortTerm = accounts.reduce((s, a) => s + a.realized_ytd.short_term, 0);
   const checks = accounts.flatMap((a) => a.checks.map((c) => ({ ...c, account: a.name })));
+  const mismatches = checks.filter((c) => c.kind === 'quantity');
+  const noCost = checks.filter((c) => c.kind === 'cost');
+  const sold = accounts.reduce((s, a) => s + (a.realized_ytd.sold ?? 0), 0);
+  const unknown = accounts.reduce((s, a) => s + (a.realized_ytd.no_cost ?? 0), 0);
+  // Realized is partial while some of this year's sales have no cost (Bikram, 2026-10-12).
+  const covered = sold > 0 && unknown > 0 ? Math.floor(((sold - unknown) / sold) * 100) : null;
   const unreal = sum(unrealized);
   return {
     value: (
@@ -1272,7 +1416,11 @@ function holdingsWidgets(
           label="Realized YTD"
           value={m(usd(realized))}
           valueClassName={toneClass(realized)}
-          caption={`short-term ${m(usd(shortTerm))} · see lots`}
+          caption={
+            covered === null
+              ? `short-term ${m(usd(shortTerm))} · see lots`
+              : `partial: ${covered}% of sales have a cost`
+          }
           className="h-full hover:bg-muted/50"
         />
       </Link>
@@ -1281,22 +1429,292 @@ function holdingsWidgets(
       <Tile
         label="Data check"
         value={
-          checks.length ? (
+          mismatches.length ? (
             <span className="flex items-center gap-1.5 text-base text-loss">
               <CircleAlert className="size-4" />
-              {checks.length} mismatch{checks.length > 1 ? 'es' : ''}
+              {mismatches.length} mismatch{mismatches.length > 1 ? 'es' : ''}
             </span>
           ) : (
             <span className="text-base text-gain">All lots match</span>
           )
         }
         caption={
-          checks[0]
-            ? `${checks[0].symbol}: ${m(checkNote(checks[0]))}`
-            : 'lots against held quantity'
+          <span className="flex flex-col">
+            <span>
+              {mismatches[0]
+                ? `${mismatches[0].symbol}: ${m(checkNote(mismatches[0]))}`
+                : 'lots against held quantity'}
+            </span>
+            {noCost.length > 0 && (
+              <span className="text-warning">
+                {noCost.length} holding{noCost.length > 1 ? 's have' : ' has'} shares with no cost
+              </span>
+            )}
+          </span>
         }
       />
     ),
+  };
+}
+
+/**
+ * One symbol you hold or watch, or in DataEdge's list (Bikram, 2026-10-12): the Symbols rows. `in`
+ * says where it is from (several at once); saved views over them are stock screens.
+ */
+interface SymbolRow {
+  symbol: string;
+  in: string[];
+  /** Live price; loaded for the rows the view shows. */
+  price: number | null;
+  /** Shares held across your accounts; null when you hold none. */
+  quantity: number | null;
+  accounts: string[];
+}
+const IN = { holdings: 'Holdings', watchlist: 'Watchlist', dataedge: 'DataEdge' } as const;
+/** The `in` filter's picks: which lists the Symbols rows come from. */
+const inValues = (tokens: { key: string; value: string }[]) =>
+  tokens.filter((t) => t.key === 'in').map((t) => t.value);
+
+function symbolsDomain(facts: Record<string, SymbolFacts>): ViewDomain<SymbolRow> {
+  return {
+    id: 'symbols',
+    formulas: true,
+    groups: [rowGroup('Holding'), SYMBOL_GROUP],
+    rowKey: (r) => r.symbol,
+    text: (r) => [r.symbol],
+    fields: [
+      {
+        key: 'symbol',
+        label: 'Symbol',
+        icon: Tag,
+        value: (r) => r.symbol,
+        format: 'text',
+        formula: 'the ticker',
+        filterable: true,
+      },
+      {
+        key: 'in',
+        label: 'In',
+        icon: Layers,
+        value: (r) => r.in.join(', '),
+        values: (r) => r.in,
+        format: 'text',
+        formula: 'Holdings, Watchlist or DataEdge (its symbol list); pick with the In filter',
+        filterable: true,
+        groupable: true,
+      },
+      {
+        key: 'price',
+        label: 'Price',
+        icon: CircleDollarSign,
+        value: (r) => r.price,
+        format: 'price',
+        formula: 'last trade (live)',
+      },
+      {
+        key: 'quantity',
+        label: 'Shares',
+        icon: Hash,
+        value: (r) => r.quantity,
+        format: 'number',
+        amount: true,
+        formula: 'shares held across your accounts',
+        aggregate: 'sum',
+      },
+      {
+        key: 'market_value',
+        label: 'Value',
+        icon: Banknote,
+        value: (r) => (r.price === null || r.quantity === null ? null : r.price * r.quantity),
+        format: 'price',
+        amount: true,
+        formula: 'price × shares',
+        aggregate: 'sum',
+      },
+      {
+        key: 'accounts',
+        label: 'Accounts',
+        icon: Briefcase,
+        value: (r) => (r.accounts.length ? r.accounts.join(', ') : null),
+        values: (r) => r.accounts,
+        format: 'text',
+        formula: 'the accounts that hold it',
+      },
+      ...symbolFields((r: SymbolRow) => r.symbol, facts),
+    ],
+  };
+}
+
+/** Holdings, Watchlist and (when picked) DataEdge's symbols as one row each. */
+function symbolRows(
+  holdings: Holding[],
+  watch: string[],
+  dataedge: string[],
+  prices: Record<string, { last?: number | null } | null>,
+): SymbolRow[] {
+  const m = new Map<string, SymbolRow>();
+  const row = (symbol: string) => {
+    let r = m.get(symbol);
+    if (!r) {
+      r = { symbol, in: [], price: null, quantity: null, accounts: [] };
+      m.set(symbol, r);
+    }
+    return r;
+  };
+  const add = (r: SymbolRow, where: string) => {
+    if (!r.in.includes(where)) r.in.push(where);
+  };
+  for (const h of holdings) {
+    if (h.kind === 'Cash' || h.closed) continue;
+    const r = row(h.underlying);
+    add(r, IN.holdings);
+    if (!r.accounts.includes(h.account.name)) r.accounts.push(h.account.name);
+    if (h.kind === 'Shares') r.quantity = (r.quantity ?? 0) + h.quantity;
+  }
+  for (const w of watch) add(row(w), IN.watchlist);
+  for (const d of dataedge) add(row(d), IN.dataedge);
+  for (const r of m.values()) {
+    const q = prices[r.symbol];
+    r.price = q && typeof q.last === 'number' ? q.last : null;
+  }
+  return [...m.values()];
+}
+
+/** One account (Bikram, 2026-10-12): the Accounts rows, rolled up from its holdings. */
+interface AccountRow {
+  account: Portfolio;
+  holdings: number;
+  basis: number | null;
+  value: number | null;
+  unrealized: number | null;
+}
+
+function accountRows(accounts: Portfolio[], holdings: Holding[]): AccountRow[] {
+  return accounts.map((a) => {
+    const own = holdings.filter((h) => h.account.id === a.id && h.kind !== 'Cash' && !h.closed);
+    const sum = (f: (h: Holding) => number | null) =>
+      own.reduce<number | null>((s, h) => {
+        const v = f(h);
+        return s === null || v === null ? null : s + v;
+      }, 0);
+    return {
+      account: a,
+      holdings: own.length,
+      basis: sum(basis),
+      value: own.some((h) => h.last === null) ? null : (sum(value) ?? 0) + a.cash,
+      unrealized: sum(unrealized),
+    };
+  });
+}
+
+const SOURCE_LABEL = { snaptrade: 'SnapTrade', manual: 'Manual' } as const;
+
+function accountsDomain(trading: Map<string, string>): ViewDomain<AccountRow> {
+  return {
+    id: 'accounts',
+    formulas: true,
+    groups: [ACCOUNT_GROUP],
+    rowKey: (r) => r.account.id,
+    text: (r) => [r.account.name, r.account.broker ?? ''],
+    fields: [
+      {
+        key: 'account',
+        label: 'Account',
+        icon: Briefcase,
+        value: (r) => r.account.name,
+        format: 'text',
+        formula: 'account name',
+        filterable: true,
+      },
+      ...accountFields((r: AccountRow) => [r.account], trading).filter((f) => f.key !== 'cash'),
+      {
+        key: 'tax_type',
+        label: 'Tax type',
+        icon: Landmark,
+        value: (r) => taxLabel(r.account),
+        format: 'text',
+        formula: 'account.tax_type',
+        filterable: true,
+        groupable: true,
+      },
+      {
+        key: 'source',
+        label: 'Source',
+        icon: Plug,
+        value: (r) => SOURCE_LABEL[r.account.source],
+        format: 'text',
+        formula: 'SnapTrade (synced from the broker) or Manual',
+        filterable: true,
+        groupable: true,
+      },
+      {
+        key: 'holdings',
+        label: 'Holdings',
+        icon: Hash,
+        value: (r) => r.holdings,
+        format: 'integer',
+        formula: 'open positions, cash aside',
+        aggregate: 'sum',
+      },
+      {
+        key: 'cash',
+        label: 'Cash',
+        icon: Banknote,
+        value: (r) => r.account.cash,
+        format: 'price',
+        amount: true,
+        formula: "the account's cash balance",
+        aggregate: 'sum',
+      },
+      {
+        key: 'cost_basis',
+        label: 'Cost basis',
+        icon: Banknote,
+        value: (r) => r.basis,
+        format: 'price',
+        amount: true,
+        formula: 'sum of its holdings’ cost basis',
+        aggregate: 'sum',
+      },
+      {
+        key: 'market_value',
+        label: 'Value',
+        icon: Banknote,
+        value: (r) => r.value,
+        format: 'price',
+        amount: true,
+        formula: 'its holdings’ value (live) + cash',
+        aggregate: 'sum',
+      },
+      {
+        key: 'unrealized',
+        label: 'Unrealized',
+        icon: TrendingUp,
+        value: (r) => r.unrealized,
+        format: 'signed',
+        amount: true,
+        formula: 'value − cost basis, cash aside',
+        aggregate: 'sum',
+      },
+      {
+        key: 'realized_ytd',
+        label: 'Realized YTD',
+        icon: CircleDollarSign,
+        value: (r) => r.account.realized_ytd.total,
+        format: 'signed',
+        amount: true,
+        formula: 'gains closed this calendar year (closed lots)',
+        aggregate: 'sum',
+      },
+      {
+        key: 'as_of',
+        label: 'As of',
+        icon: CalendarDays,
+        value: (r) => r.account.as_of.slice(0, 10),
+        format: 'text',
+        formula: 'when its positions were last synced or written',
+      },
+    ],
   };
 }
 
@@ -1332,17 +1750,94 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
       }
     : { name: view.name, ...view.config };
   const { list, accounts, rows, loading, error, quotes, setShown } = useHoldings(
-    view.domain === 'holdings' && showsLive(config),
+    (view.domain === 'holdings' || view.domain === 'accounts') && showsLive(config),
   );
-  const holdings = useMemo(
-    () => holdingsDomain((set) => qc.setQueryData(tagsQuery().queryKey, set)),
-    [qc],
-  );
+  // Every holding and tag, unfiltered, for the Sector and Basket pickers.
+  const tags = qc.getQueryData(tagsQuery().queryKey);
+  const known = useRef({ rows, set: tags });
+  known.current = { rows, set: tags };
   const activity = useActivity(accounts, view.domain === 'transactions');
   const lots = useMemo<LotRow[]>(
     () => (view.domain === 'tax_lots' ? lotRows(accounts) : []),
     [accounts, view.domain],
   );
+  // Symbols (Bikram, 2026-10-12): your holdings and watchlist, and DataEdge's list once `in` picks it.
+  const symbolsView = view.domain === 'symbols';
+  const [inScope, setInScope] = useState(() => inValues(config.filters.default));
+  const onTokens = useCallback((tokens: { key: string; value: string }[]) => {
+    const next = inValues(tokens);
+    setInScope((was) => (was.join() === next.join() ? was : next));
+  }, []);
+  const watch = useQuery({ ...watchlistQuery(), enabled: symbolsView });
+  const dataedge = useQuery(dataedgeSymbolsQuery(symbolsView && inScope.includes(IN.dataedge)));
+  // Symbol prices for the rows the view shows (a page at most), when it shows a price.
+  const [shownSymbols, setShownSymbols] = useState('');
+  const onShownSymbols = useCallback(
+    (shown: SymbolRow[]) =>
+      setShownSymbols(
+        shown
+          .slice(0, 100)
+          .map((r) => r.symbol)
+          .sort()
+          .join(','),
+      ),
+    [],
+  );
+  const symbolPrices = useQuery(
+    quotesQuery(symbolsView && shownSymbols && showsLive(config) ? shownSymbols.split(',') : []),
+  );
+  const symbolList = useMemo(
+    () =>
+      symbolsView
+        ? symbolRows(
+            rows,
+            (watch.data ?? []).map((w) => w.symbol),
+            dataedge.data ?? [],
+            (symbolPrices.data?.quotes ?? {}) as Record<string, { last?: number | null } | null>,
+          )
+        : [],
+    [symbolsView, rows, watch.data, dataedge.data, symbolPrices.data],
+  );
+  // Symbol and account lookups load only for views that use them (Bikram, 2026-10-12).
+  const trading = useTrading(usesTrading(config));
+  const factSymbols = useMemo(() => {
+    if (view.domain === 'holdings')
+      return rows.filter((h) => h.kind !== 'Cash').map((h) => h.underlying);
+    if (view.domain === 'transactions')
+      return activity.rows.flatMap((t) =>
+        (t.underlying ?? t.symbol) ? [t.underlying ?? t.symbol ?? ''] : [],
+      );
+    if (view.domain === 'tax_lots') return lots.map((l) => l.underlying);
+    if (symbolsView)
+      return symbolList
+        .filter((r) => !inScope.length || r.in.some((w) => inScope.includes(w)))
+        .map((r) => r.symbol);
+    return [];
+  }, [view.domain, rows, activity.rows, lots, symbolsView, symbolList, inScope]);
+  const symbolFacts = useSymbolFacts(factSymbols, usesSymbolFields(config));
+  const facts = symbolFacts.facts;
+  const holdings = useMemo(
+    () =>
+      holdingsDomain(
+        (set) => qc.setQueryData(tagsQuery().queryKey, set),
+        () => known.current,
+        facts,
+        trading,
+      ),
+    [qc, facts, trading],
+  );
+  const symbolsDom = useMemo(() => symbolsDomain(facts), [facts]);
+  const accountsDom = useMemo(() => accountsDomain(trading), [trading]);
+  const lotsDom = useMemo(() => taxLotsDomain(facts, trading), [facts, trading]);
+  const activityDom = useMemo(() => transactionsDomain(facts, trading), [facts, trading]);
+  const accountList = useMemo(
+    () => (view.domain === 'accounts' ? accountRows(accounts, rows) : []),
+    [view.domain, accounts, rows],
+  );
+  // Accounts price every holding they roll up.
+  useEffect(() => {
+    if (view.domain === 'accounts') setShown(rows);
+  }, [view.domain, rows, setShown]);
   const hidden = useAmountsHidden();
   const listKey = portfolioViewsQuery(view.domain).queryKey;
   const save = useMutation({
@@ -1363,7 +1858,7 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
     mutationFn: () => deletePortfolioView(view.domain, view.id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: listKey });
-      void navigate({ to: '/portfolio' });
+      void navigate({ to: symbolsView ? '/symbols' : '/portfolio' });
     },
   });
   // Loaded data stays on screen when a refresh fails; the status bar says so (Bikram, 2026-10-09).
@@ -1376,7 +1871,7 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
   const common = {
     key: `${view.domain}:${view.id}:${view.updated_at}`,
     viewId: view.app ? undefined : view.id,
-    crumbs: [{ label: 'Portfolio' }, { label: view.name }],
+    crumbs: [{ label: symbolsView ? 'Symbols' : 'Portfolio' }, { label: view.name }],
     config,
     onConfigChange: view.app ? undefined : (c: CustomViewConfig) => save.mutate(c),
     // Your own views duplicate and delete from the Edit dialog's More section; an app view has no
@@ -1401,8 +1896,9 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
     ),
     status: (
       <>
-        <PortfolioStatus accounts={accounts} />
+        {!symbolsView && <PortfolioStatus accounts={accounts} />}
         <StatusItem label="Made by" value={view.app ? 'App' : 'You'} />
+        {usesSymbolFields(config) && <SymbolStatus read={symbolFacts} />}
         {(list.data && error) || quotes.error ? (
           <StatusItem label="Refresh failed" value={(error ?? quotes.error)?.message} ok={false} />
         ) : stale ? (
@@ -1416,11 +1912,39 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
       </>
     ),
   };
+  if (symbolsView) {
+    return (
+      <CustomViewPage
+        {...common}
+        domain={symbolsDom}
+        rows={symbolList}
+        onTokens={onTokens}
+        onShownRows={onShownSymbols}
+        rowTitle={(r) => r.symbol}
+        state={loadState({
+          error: list.data ? null : (error ?? watch.error),
+          loading: loading || watch.isPending,
+          empty: false,
+        })}
+      />
+    );
+  }
+  if (view.domain === 'accounts') {
+    return (
+      <CustomViewPage
+        {...common}
+        domain={accountsDom}
+        rows={accountList}
+        rowTitle={(r) => r.account.name}
+        state={state}
+      />
+    );
+  }
   if (view.domain === 'tax_lots') {
     return (
       <CustomViewPage
         {...common}
-        domain={TAX_LOTS}
+        domain={lotsDom}
         rows={lots}
         widget={(k, shown) => lotsWidget(k, shown, hidden)}
         rowTitle={(l) => `${l.label} · ${l.account.name}`}
@@ -1432,7 +1956,7 @@ function PortfolioViewBody({ view, show }: { view: PortfolioView; show?: Status 
     return (
       <CustomViewPage
         {...common}
-        domain={TRANSACTIONS}
+        domain={activityDom}
         rows={activity.rows}
         rowTitle={(t) => instrument(t) ?? ACTION[t.kind] ?? t.kind}
         state={
@@ -1500,10 +2024,31 @@ export function TaxLotsPage() {
   return <PortfolioViewById domain="tax_lots" id={TAX_LOTS_ID} show={show} />;
 }
 
+/** `/portfolio/accounts`: the Accounts app view (Bikram, 2026-10-12). */
+export function AccountsPage() {
+  return <PortfolioViewById domain="accounts" id="accounts" />;
+}
+
+/** `/symbols`: the My symbols app view, a stock screen over your symbols (Bikram, 2026-10-12). */
+export function SymbolsPage() {
+  return <PortfolioViewById domain="symbols" id="my-symbols" />;
+}
+
+/** `/symbols/views/$id`: a person's own stock screen. */
+export function SymbolViewPage() {
+  const { id } = useParams({ from: '/symbols/views/$id' });
+  return <PortfolioViewById domain="symbols" id={id} />;
+}
+
 /** `/portfolio/views/$domain/$id`: a person's own view. */
 export function PortfolioViewPage() {
   const { domain, id } = useParams({ from: '/portfolio/views/$domain/$id' });
-  if (domain !== 'holdings' && domain !== 'transactions' && domain !== 'tax_lots') {
+  if (
+    domain !== 'holdings' &&
+    domain !== 'transactions' &&
+    domain !== 'tax_lots' &&
+    domain !== 'accounts'
+  ) {
     return (
       <Page crumbs={[{ label: 'Portfolio' }, { label: 'Not found' }]}>
         <ErrorNote>No portfolio views of {domain}.</ErrorNote>
@@ -1538,81 +2083,108 @@ function Facts({ items }: { items: [string, ReactNode][] }) {
 
 function CheckDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
-  const off = partsOf(h).filter((p) => p.check);
-  if (!off.length)
-    return (
-      <p className="text-sm text-muted-foreground">
-        Lots match: the open lots of {h.symbol} add up to the quantity held.
-      </p>
-    );
+  const off = partsOf(h).flatMap((p) => p.checks.map((c) => ({ p, c })));
+  const fine = partsOf(h).some((p) => !p.checks.some((c) => c.kind === 'quantity'));
   return (
     <div className="flex flex-col gap-2 text-sm">
-      {off.map((p) => {
-        const c = p.check as Portfolio['checks'][number];
-        return (
-          <div key={p.key} className="flex flex-col gap-1">
-            <p className="text-loss">{checkSentence(c, p.account.name, m)}</p>
-            <p className="text-xs text-muted-foreground">{checkFix(c, p.account)}</p>
-          </div>
-        );
-      })}
+      {fine && (
+        <p className="text-gain">
+          {h.closed
+            ? `Lots match: ${h.symbol} is sold out and has no open lots.`
+            : `Lots match: the open lots of ${h.symbol} add up to the quantity held.`}
+        </p>
+      )}
+      {off.map(({ p, c }) => (
+        <div key={`${p.key}:${c.kind}`} className="flex flex-col gap-1">
+          <p className={c.kind === 'quantity' ? 'text-loss' : 'text-warning'}>
+            {checkSentence(c, p.account.name, m)}
+          </p>
+          <p className="text-xs text-muted-foreground">{checkFix(c, p.account)}</p>
+        </div>
+      ))}
     </div>
   );
 }
 
 /** What a check means, in the words of where the holding's lots come from (`lots.ts` on the server). */
-function checkSentence(c: Portfolio['checks'][number], account: string, m: (s: string) => string) {
-  const q = (v: number) => m(num(v, v % 1 ? 4 : 0));
-  if (c.source === 'snaptrade')
-    return `The broker's lots add up to ${q(c.in_lots)}; ${account} holds ${q(c.held)}.`;
+function checkSentence(c: LotCheck, account: string, m: (s: string) => string) {
+  const q = (v: number) => m(qty(v));
+  if (c.kind === 'cost')
+    return `${q(c.no_cost)} shares of ${c.symbol} in ${account} have no buy on record (transferred in, an RSU vest, or bought before the history starts), so their gain is left out of Realized.`;
   if (c.source === 'manual')
     return `Your lots add up to ${q(c.in_lots)}; ${account} holds ${q(c.held)}.`;
-  const gap = c.held - c.in_lots;
-  return gap > 0
-    ? `${q(gap)} of the ${q(c.held)} held in ${account} have no buy on record, so no lot.`
-    : `The buys and sells leave ${q(c.in_lots)}; ${account} holds ${q(c.held)}.`;
+  if (c.source === 'derived')
+    return `The trades leave ${q(c.in_lots)} open; ${account} holds ${q(c.held)}.`;
+  return `The broker's lots add up to ${q(c.in_lots)}; ${account} holds ${q(c.held)}.`;
 }
 
 /** Who can fix a check, and how. */
-const checkFix = (c: Portfolio['checks'][number], account: Portfolio) =>
-  account.source === 'snaptrade'
-    ? 'This account syncs from SnapTrade: sync it again, and check its Tax lots add-on is on.'
-    : c.source === 'manual'
-      ? 'Fix the lots in the app, or an agent sends them with portfolio_lot_write.'
-      : 'An agent sends the missing transactions with portfolio_transaction_write.';
+const checkFix = (c: LotCheck, account: Portfolio) =>
+  c.kind === 'cost'
+    ? 'Set the cost on the lot under Tax lots (from your old broker or statement), or an agent sets it with portfolio_lot_cost_write.'
+    : account.source === 'snaptrade'
+      ? "The broker's own lots differ from its position: usually its rounding. Sync again; if it stays, the broker's data is off."
+      : 'Fix the lots in the app, or an agent sends them with portfolio_lot_write.';
 
-function PositionDetails({ holding: h }: { holding: Holding }) {
+/** The holding at a glance: position, gains and dividends, then the accounts it sits in. */
+function SummaryDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
+  const year = String(new Date().getFullYear());
+  // Shares with no buy on record carry no cost, so their gain is left out of Realized.
+  const unknown = partsOf(h)
+    .flatMap((p) => p.account.closed_lots.filter((c) => c.symbol === p.symbol && c.gain === null))
+    .reduce((s, c) => s + Math.abs(c.quantity), 0);
+  const gains = (v: number | null) => (
+    <span key="r" className="inline-flex items-center gap-1.5">
+      {unknown > 0 && (
+        <CostChip
+          label="partial"
+          tip={`${num(unknown, unknown % 1 ? 4 : 0)} shares sold have no buy on record (transferred in, an RSU vest, or bought before the history starts), so their gain is left out until you set their cost under Tax lots.`}
+        />
+      )}
+      <ViewValueCell amount value={v} format="signed" />
+    </span>
+  );
   return (
-    <Facts
-      items={[
-        ['Symbol', h.symbol],
-        ['Kind', h.kind],
-        ['Expiry', h.expiration ? expLabel(h.expiration) : DASH],
-        ['Strike', h.strike === null ? DASH : num(h.strike)],
-        ['Quantity', m(num(h.quantity, h.quantity % 1 ? 4 : 0))],
-        [
-          'Avg cost',
-          h.avg_cost === null ? (
-            DASH
-          ) : lotsOf(h).some((l) => l.cost_from === 'estimate') ? (
-            <span key="a" className="inline-flex items-center gap-1.5">
-              <CostChip
-                label="est."
-                tip={`The broker sent no average cost, so this is the average of the open lots, and some lot costs are estimates (the close on the acquired day; see Tax lots). ${FIX_COST}`}
-              />
-              {num(h.avg_cost)}
-            </span>
-          ) : (
-            num(h.avg_cost)
-          ),
-        ],
-        ['Price', h.last === null ? DASH : num(h.last)],
-        ['Cost basis', <ViewValueCell key="b" amount value={basis(h)} format="price" />],
-        ['Value', <ViewValueCell key="v" amount value={value(h)} format="price" />],
-        ['Unrealized', <ViewValueCell key="u" amount value={unrealized(h)} format="signed" />],
-      ]}
-    />
+    <div className="flex flex-col gap-3">
+      <Facts
+        items={[
+          ['Symbol', h.symbol],
+          ['Kind', h.kind],
+          ['Expiry', h.expiration ? expLabel(h.expiration) : DASH],
+          ['Strike', h.strike === null ? DASH : num(h.strike)],
+          ['Quantity', m(num(h.quantity, h.quantity % 1 ? 4 : 0))],
+          [
+            'Avg cost',
+            h.avg_cost === null ? (
+              DASH
+            ) : lotsOf(h).some((l) => l.cost_from === 'estimate') ? (
+              <span key="a" className="inline-flex items-center gap-1.5">
+                <CostChip
+                  label="est."
+                  tip={`The broker sent no average cost, so this is the average of the open lots, and some lot costs are estimates (the close on the acquired day; see Tax lots). ${FIX_COST}`}
+                />
+                {num(h.avg_cost)}
+              </span>
+            ) : (
+              num(h.avg_cost)
+            ),
+          ],
+          ['Price', h.last === null ? DASH : num(h.last)],
+          ['Cost basis', <ViewValueCell key="b" amount value={basis(h)} format="price" />],
+          ['Value', <ViewValueCell key="v" amount value={value(h)} format="price" />],
+          ['Unrealized', <ViewValueCell key="u" amount value={unrealized(h)} format="signed" />],
+          ['Realized', gains(realized(h))],
+          ['Realized YTD', gains(realized(h, year))],
+          ['Dividends', <ViewValueCell key="d" amount value={dividends(h)} format="signed" />],
+          [
+            'Dividends YTD',
+            <ViewValueCell key="dy" amount value={dividends(h, true)} format="signed" />,
+          ],
+        ]}
+      />
+      <AccountDetails holding={h} />
+    </div>
   );
 }
 
@@ -1625,9 +2197,12 @@ function DetailsTable({
   head,
   rows,
 }: {
-  head: { label: string; right?: boolean }[];
+  /** `grow` marks the column that takes the spare width; the last column does by default. */
+  head: { label: string; right?: boolean; grow?: boolean }[];
   rows: { key: string; cells: ReactNode[] }[];
 }) {
+  const marked = head.findIndex((h) => h.grow);
+  const grow = marked >= 0 ? marked : head.length - 1;
   return (
     <div className="-mx-1 overflow-x-auto rounded-md border">
       <Table>
@@ -1636,7 +2211,7 @@ function DetailsTable({
             {head.map((h, i) => (
               <TableHead
                 key={h.label}
-                className={cn(h.right && 'text-right', i < head.length - 1 && 'w-px')}
+                className={cn(h.right && 'text-right', i !== grow && 'w-px')}
               >
                 {h.label}
               </TableHead>
@@ -1650,11 +2225,7 @@ function DetailsTable({
                 <TableCell
                   // biome-ignore lint/suspicious/noArrayIndexKey: cells are positional
                   key={i}
-                  className={cn(
-                    'num',
-                    head[i]?.right && 'text-right',
-                    i < head.length - 1 && 'w-px',
-                  )}
+                  className={cn('num', head[i]?.right && 'text-right', i !== grow && 'w-px')}
                 >
                   {c}
                 </TableCell>
@@ -1724,6 +2295,93 @@ function LotCost({ lot: l }: { lot: TaxLot }) {
   );
 }
 
+/** A share lot with no cost on record: sold with none, or open with none found. */
+const noCost = (l: LotRow) =>
+  l.lot === null ? l.cost === null && l.quantity > 0 : l.lot.cost_from === 'missing';
+
+/**
+ * A lot's missing cost and a pencil to set it (Bikram, 2026-10-12): your cost per share for that
+ * symbol's lots acquired that day, kept across syncs (PUT lot-costs, as portfolio_lot_cost_write).
+ */
+function SetCost({ row: l }: { row: LotRow }) {
+  const [editing, setEditing] = useState(false);
+  const [cost, setCost] = useState('');
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: () =>
+      writeLotCost(l.account.id, {
+        underlying: l.symbol,
+        acquired: l.acquired,
+        cost: Number(cost),
+      }),
+    onSuccess: () => {
+      setEditing(false);
+      void qc.invalidateQueries({ queryKey: ['portfolios'] });
+    },
+  });
+  const valid = cost.trim() !== '' && Number.isFinite(Number(cost)) && Number(cost) >= 0;
+  if (!editing)
+    return (
+      <span className="inline-flex items-center justify-end gap-1.5">
+        <CostChip
+          label="no cost"
+          tip={`No buy on record for these ${l.symbol} shares (transferred in, an RSU vest, or bought before the history starts), so their gain is left out of Realized. Set your cost per share for the lots acquired ${l.acquired}.`}
+        />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6"
+          aria-label={`Set the cost of ${l.symbol} acquired ${l.acquired}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setEditing(true);
+          }}
+        >
+          <Pencil className="size-3.5" />
+        </Button>
+      </span>
+    );
+  return (
+    <form
+      className="inline-flex items-center justify-end gap-1"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (valid) save.mutate();
+      }}
+    >
+      <Input
+        autoFocus
+        inputMode="decimal"
+        aria-label={`Cost per share of ${l.symbol}`}
+        placeholder="cost / share"
+        value={cost}
+        onChange={(e) => setCost(e.target.value)}
+        className="h-7 w-24 text-right font-mono text-xs"
+      />
+      <Button
+        type="submit"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        disabled={!valid || save.isPending}
+        aria-label="Save cost"
+      >
+        <Check className="size-3.5" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        aria-label="Cancel"
+        onClick={() => setEditing(false)}
+      >
+        <X className="size-3.5" />
+      </Button>
+    </form>
+  );
+}
+
 /** The holding's tax lots, open and closed, in every account it spans; All / Open / Closed picks. */
 function LotDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
@@ -1755,10 +2413,16 @@ function LotDetails({ holding: h }: { holding: Holding }) {
             cells: [
               <CostChip key="st" label={STATUS[l.status]} tip={STATUS_TIP[l.status]} />,
               ...(many ? [l.account.name] : []),
-              l.acquired,
+              l.before ? 'Before history' : l.acquired,
               l.closed ?? DASH,
               m(num(l.quantity, l.quantity % 1 ? 4 : 0)),
-              l.lot ? <LotCost key="c" lot={l.lot} /> : amount(l.cost),
+              noCost(l) ? (
+                <SetCost key="c" row={l} />
+              ) : l.lot ? (
+                <LotCost key="c" lot={l.lot} />
+              ) : (
+                amount(l.cost)
+              ),
               amount(l.sell),
               l.gain === null ? (
                 DASH
@@ -1784,41 +2448,103 @@ function LotDetails({ holding: h }: { holding: Holding }) {
   );
 }
 
+/** All, Buy, Sell or Transfer: the transactions button group in a holding's drawer (Bikram, 2026-10-12). */
+type Moves = 'all' | 'buy' | 'sell' | 'transfer';
+const movesOf = (kind: string): Moves | null =>
+  kind === 'buy' || kind === 'sell'
+    ? kind
+    : kind === 'transfer_in' || kind === 'transfer_out'
+      ? 'transfer'
+      : null;
+
+/** A transaction's action: Buy and Sell in their own colours, a transfer with the broker's text on hover. */
+function ActionChip({ t }: { t: Transaction }) {
+  const label = ACTION[t.kind] ?? t.kind;
+  const move = movesOf(t.kind);
+  if (!move) return <>{label}</>;
+  const chip = (
+    <Badge
+      variant="outline"
+      className={cn(
+        'font-sans',
+        move === 'buy' && 'border-gain/40 text-gain',
+        move === 'sell' && 'border-loss/40 text-loss',
+      )}
+    >
+      {label}
+    </Badge>
+  );
+  return move === 'transfer' && t.description ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-help">{chip}</span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64 text-left">{t.description}</TooltipContent>
+    </Tooltip>
+  ) : (
+    chip
+  );
+}
+
 function TransactionDetails({ holding: h }: { holding: Holding }) {
   const m = useMask();
+  const [show, setShow] = useState<Moves>('all');
   const parts = partsOf(h);
   const many = parts.length > 1;
   const qs = useQueries({ queries: parts.map((p) => transactionsQuery(p.account.id, h.symbol)) });
   if (qs.some((q) => q.isPending)) return <Skeleton className="h-24 w-full" />;
   const failed = qs.find((q) => q.isError);
   if (failed?.error) return <ErrorNote>{failed.error.message}</ErrorNote>;
-  const rows = parts
+  const all = parts
     .flatMap((p, i) => (qs[i]?.data ?? []).map((t) => ({ p, t })))
     .sort((a, b) => b.t.date.localeCompare(a.t.date));
-  if (!rows.length)
+  if (!all.length)
     return <p className="text-sm text-muted-foreground">No transactions for {h.symbol}.</p>;
+  const rows = show === 'all' ? all : all.filter(({ t }) => movesOf(t.kind) === show);
   return (
-    <DetailsTable
-      head={[
-        ...(many ? [{ label: 'Account' }] : []),
-        { label: 'Date' },
-        { label: 'Action' },
-        { label: 'Qty @ price', right: true },
-        { label: 'Amount', right: true },
-      ]}
-      rows={rows.map(({ p, t }) => ({
-        key: `${p.key}:${t.id}`,
-        cells: [
-          ...(many ? [p.account.name] : []),
-          t.date,
-          ACTION[t.kind] ?? t.kind,
-          t.quantity !== null
-            ? `${m(num(t.quantity, t.quantity % 1 ? 4 : 0))} @ ${num(t.price)}`
-            : DASH,
-          m(usd(t.amount)),
-        ],
-      }))}
-    />
+    <div className="flex flex-col gap-2">
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        spacing={0}
+        value={show}
+        onValueChange={(v) => v && setShow(v as Moves)}
+        aria-label="Show"
+      >
+        <ToggleGroupItem value="all">All</ToggleGroupItem>
+        <ToggleGroupItem value="buy">Buy</ToggleGroupItem>
+        <ToggleGroupItem value="sell">Sell</ToggleGroupItem>
+        <ToggleGroupItem value="transfer">Transfer</ToggleGroupItem>
+      </ToggleGroup>
+      {rows.length ? (
+        <DetailsTable
+          head={[
+            ...(many ? [{ label: 'Account' }] : []),
+            { label: 'Date' },
+            { label: 'Action', grow: true },
+            { label: 'Qty @ price', right: true },
+            { label: 'Amount', right: true },
+          ]}
+          rows={rows.map(({ p, t }) => ({
+            key: `${p.key}:${t.id}`,
+            cells: [
+              ...(many ? [p.account.name] : []),
+              t.date,
+              <ActionChip key="a" t={t} />,
+              t.quantity === null
+                ? DASH
+                : movesOf(t.kind) === 'transfer'
+                  ? m(num(t.quantity, t.quantity % 1 ? 4 : 0))
+                  : `${m(num(t.quantity, t.quantity % 1 ? 4 : 0))} @ ${num(t.price)}`,
+              m(usd(t.amount)),
+            ],
+          }))}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">None of these for {h.symbol}.</p>
+      )}
+    </div>
   );
 }
 

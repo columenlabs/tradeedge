@@ -196,3 +196,45 @@ export function rawClosesQuery(
     params: { symbols: symbols.join(','), from, to },
   };
 }
+
+/**
+ * Symbol fields from DataEdge (Bikram, 2026-10-12): each symbol's latest value of each indicator
+ * output in `indicators` (`indicators_1d`, last close) and its latest trailing P/E (`series_1d`
+ * `pe:<SYMBOL>`, field `trailing`), with the day each is from.
+ */
+export function symbolFactsQuery(
+  symbols: string[],
+  indicators: string[],
+  database = DEFAULT_DATABASE,
+): Query {
+  if (!IDENT_RE.test(database)) throw new Error(`invalid database: ${database}`);
+  return {
+    sql: [
+      'SELECT symbol, indicator AS field, argMax(value, trading_date) AS value,',
+      'toString(max(trading_date)) AS date',
+      `FROM ${database}.indicators_1d FINAL`,
+      "WHERE symbol IN (SELECT arrayJoin(splitByChar(',', {symbols:String})))",
+      "AND indicator IN (SELECT arrayJoin(splitByChar(',', {indicators:String})))",
+      'AND trading_date >= today() - 14',
+      'GROUP BY symbol, indicator',
+      'UNION ALL',
+      "SELECT replaceOne(series_id, 'pe:', '') AS symbol, 'pe_ttm_daily' AS field,",
+      'argMax(value, obs_date) AS value, toString(max(obs_date)) AS date',
+      `FROM ${database}.series_1d FINAL`,
+      "WHERE field = 'trailing' AND series_id IN",
+      "(SELECT arrayJoin(arrayMap(s -> concat('pe:', s), splitByChar(',', {symbols:String}))))",
+      'AND obs_date >= today() - 14',
+      'GROUP BY series_id',
+    ].join(' '),
+    params: { symbols: symbols.join(','), indicators: indicators.join(',') },
+  };
+}
+
+/** DataEdge's symbol list: every symbol with indicators in the last two weeks (~800). */
+export function symbolListQuery(database = DEFAULT_DATABASE): Query {
+  if (!IDENT_RE.test(database)) throw new Error(`invalid database: ${database}`);
+  return {
+    sql: `SELECT DISTINCT symbol FROM ${database}.indicators_1d WHERE trading_date >= today() - 14 ORDER BY symbol`,
+    params: {},
+  };
+}

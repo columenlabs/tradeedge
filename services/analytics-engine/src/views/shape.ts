@@ -17,6 +17,7 @@ import type {
   ViewToken,
   ViewValue,
 } from '@edgedesk/types/views';
+import { meetsNumber } from '@edgedesk/types/views';
 
 /** A view problem, named by column so the writer (a person or Claude) can fix it. */
 export class ViewError extends Error {
@@ -197,7 +198,19 @@ export function filterRows<R extends Row>(
 ): R[] {
   if (!tokens.length) return rows;
   const byKey = new Map<string, { inc: Set<string>; exc: Set<string> }>();
+  // Number conditions (`op`) each test the row on their own.
+  const conditions = tokens
+    .filter((t) => t.op)
+    .map((t) => {
+      if (!fields.includes(t.key)) throw new ViewError(t.key, 'not a filterable field');
+      const i = index(ctx, t.key, 'filters');
+      return (r: Row) => {
+        const v = r.values[i] ?? null;
+        return meetsNumber(t.op, t.value, typeof v === 'number' ? v : null);
+      };
+    });
   for (const t of tokens) {
+    if (t.op) continue;
     if (!fields.includes(t.key)) throw new ViewError(t.key, 'not a filterable field');
     const sets = byKey.get(t.key) ?? { inc: new Set<string>(), exc: new Set<string>() };
     (t.not ? sets.exc : sets.inc).add(t.value.toLowerCase());
@@ -214,7 +227,7 @@ export function filterRows<R extends Row>(
       return (!inc.size || has(inc, v)) && !has(exc, v);
     };
   });
-  return rows.filter((r) => tests.every((t) => t(r)));
+  return rows.filter((r) => tests.every((t) => t(r)) && conditions.every((t) => t(r)));
 }
 
 export function groupRows(

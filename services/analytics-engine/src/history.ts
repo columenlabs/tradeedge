@@ -126,6 +126,24 @@ export class HistoryService {
     return this.store ? this.store.rawCloses(symbols, from, to) : Promise.resolve({});
   }
 
+  /** DataEdge symbol fields (trailing P/E, technicals). Not cached, like fundNavs. Empty when
+   *  history is off. */
+  symbolFacts(
+    symbols: string[],
+    indicators: string[],
+  ): Promise<{ facts: Record<string, Record<string, number>>; asOf: string | null }> {
+    return this.store
+      ? this.store.symbolFacts(symbols, indicators)
+      : Promise.resolve({ facts: {}, asOf: null });
+  }
+
+  /** DataEdge's symbol list (~800). Cached a few minutes: it changes when a symbol is added. */
+  symbolList(): Promise<string[]> {
+    return this.store
+      ? this.cached('symbol-list', () => this.s().symbolList())
+      : Promise.resolve([]);
+  }
+
   coverage(): Promise<HistoryCoverage[]> {
     return this.cached('coverage', () => this.s().coverage());
   }

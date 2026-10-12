@@ -22,7 +22,8 @@ const domainSchema = customViewDomainSchema.refine(
   (d) => !(d in OWN_ROUTES),
   'explorer views have their own routes (/api/explorer-views, explorer_view_*)',
 );
-const idSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, 'view id');
+// Own views are `cv_<hex>` (store.ts), app views kebab-case.
+const idSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'view id');
 const nameSchema = z.string().trim().min(1).max(80);
 export const customViewWriteShape = {
   domain: domainSchema,
@@ -109,11 +110,14 @@ const WRITE_DOC = [
   '[{"key": "kind", "placement": "inline"}]. group {fields, default}: the fields a person may',
   'group by, and the one the view opens grouped by (null = flat), e.g. {"fields": ["basket",',
   '"sector"], "default": "basket"}; a group row spans the leading columns that have no roll-up.',
-  'filters {fields, default: [{key, value, not?}]}: the fields offered as filters and the tokens',
-  'the view opens with, e.g. {"fields": ["kind"], "default": [{"key": "kind", "value": "Option"}]}',
-  'for an options-only view. pivot {rows, columns, value, agg} or null: for shape pivot, e.g.',
-  '{"rows": "basket", "columns": "kind", "value": "market_value", "agg": "sum"}. icon: sidebar icon',
-  'name or null. widgets: the domain’s built-in summary widget keys in order (empty hides them).',
+  'filters {fields, default: [{key, value, not?, op?}]}: the fields offered as filters and the',
+  'tokens the view opens with, e.g. {"fields": ["kind"], "default": [{"key": "kind", "value":',
+  '"Option"}]} for an options-only view. Any number field (formulas included) can be listed;',
+  'its tokens take op gt, lt, eq or between with a number value, or "a..b" for between, e.g.',
+  '{"key": "dividends", "op": "gt", "value": "100"}. pivot {rows, columns, value, agg} or null: for shape pivot, e.g.',
+  '{"rows": "basket", "columns": "kind", "value": "market_value", "agg": "sum"}. icon: the sidebar',
+  'icon, any lucide icon name in kebab case (lucide.dev/icons, e.g. "rocket", "chart-candlestick"),',
+  'one emoji (e.g. "🚀") or null for the shape’s icon. widgets: the domain’s built-in summary widget keys in order (empty hides them).',
   'Holdings unrealized_pct is unrealized ÷ |cost basis| × 100, worked out over the group on group rows;',
   'pct_of_group is each row’s share of its group’s market value, pct_of_total its share',
   'of every shown row (a group row shows its group’s share). formulas [{key, label, expr, format,',
@@ -133,6 +137,14 @@ const WRITE_DOC = [
   'basket_write) are fields like any other: show, group, filter and chip by them, e.g. a "9-sig"',
   'view: {"shape": "group", "group": {"fields": ["basket"], "default": "basket"}, "filters":',
   '{"fields": ["basket"], "default": [{"key": "basket", "value": "9-sig"}]}}.',
+  'sort {key, desc} or null: the column the table opens sorted by, e.g. {"key": "market_value",',
+  '"desc": true}. Symbol fields (P/E, analysts, earnings, dividends, technicals; symbol_read lists',
+  'them with their sources) and account fields (brokerage, trading, cash) are lookups any',
+  'holdings, transactions or tax_lots row makes by its symbol (an option by its underlying) and',
+  'its account; formulas can use them, e.g. upside = target_mean / price - 1. symbols rows are one',
+  'per symbol; in (Holdings, Watchlist, DataEdge list) picks which, so a view on symbols is a stock',
+  'screen, e.g. filters default [{"key": "in", "value": "DataEdge list"}, {"key": "pe_ttm", "op":',
+  '"lt", "value": "25"}]. Robinhood fields need the person\'s Robinhood sign-in; without it they read null.',
 ].join(' ');
 
 /** `custom_view_*` on a desk's MCP: the caller's own views, the same rules as the REST routes. */

@@ -30,6 +30,7 @@ import { Portfolios, portfolioRoutes } from './portfolio';
 import { Screeners, screenerRoutes } from './screeners';
 import { SnapTradeBrokers } from './snaptrade';
 import { Strategies, StrategiesUnavailable, strategyRoutes } from './strategies';
+import { SymbolFactsService, symbolRoutes } from './symbols';
 import { HoldingTags, tagRoutes } from './tags';
 import { Trades, tradeRoutes } from './trades';
 import { Watchlist, watchlistRoutes } from './watchlist';
@@ -77,7 +78,8 @@ export interface TradeedgeDeps {
 }
 
 /**
- * The D1 stores. Every person's rows are sealed; without the master key their stores stay off.
+ * The D1 stores. Every person's rows are sealed; without the master key their stores stay off,
+ * unless `encryptionOptional` (the self-host entry): then rows are stored readable (src/vault.ts).
  * `vault` is returned for the entries that hand it on (researchedge in the suite).
  */
 export function tradeedgeStores(
@@ -85,14 +87,22 @@ export function tradeedgeStores(
   db: D1Like | undefined,
   market: MarketService,
   history?: HistoryService,
+  encryptionOptional = false,
 ) {
   if (!db) return { vault: undefined };
   const strategies = new Strategies(db);
-  const vault = cfg.vaultKek ? new Vault(db, cfg.vaultKek) : undefined;
+  const vault = cfg.vaultKek
+    ? new Vault(db, cfg.vaultKek)
+    : encryptionOptional
+      ? new Vault(db, null)
+      : undefined;
   if (!vault) return { vault, strategies };
   // Manual accounts are refused for brokers on SnapTrade's public list (Bikram, 2026-10-10).
   // History fills lot costs a broker left at 0 with that day's close (Bikram, 2026-10-11).
-  const portfolios = new Portfolios(db, vault, new SnapTradeBrokers().match, history);
+  // Splits split the lots bought before them (Bikram, 2026-10-11: KLAC 10:1 left sells unmatched).
+  const portfolios = new Portfolios(db, vault, new SnapTradeBrokers().match, history, (s, from) =>
+    market.splits(s, from),
+  );
   const logs = new Logs(db, vault);
   return {
     logs,
@@ -329,6 +339,9 @@ export function tradeedgeRoutes(
   if (deps.watchlist) app.route('/api/watchlist', watchlistRoutes(deps.watchlist));
   if (deps.tags) app.route('/api/tags', tagRoutes(deps.tags));
   if (deps.customViews) app.route('/api/custom-views', customViewRoutes(deps.customViews, 'trade'));
+  // Symbol fields (Bikram, 2026-10-12): the person's Robinhood sign-in and DataEdge market data.
+  const symbols = new SymbolFactsService(ctx.history, integrations);
+  app.route('/api/symbols', symbolRoutes(symbols));
   app.route('/api', apiRoutes(market, ctx, integrations));
   const access =
     deps.accessVerifier !== undefined
@@ -384,6 +397,7 @@ export function tradeedgeRoutes(
         tags: deps.tags,
         feedback: deps.feedback,
         customViews: deps.customViews,
+        symbols,
       },
       ctx,
     ),

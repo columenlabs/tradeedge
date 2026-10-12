@@ -412,6 +412,8 @@ export const SERVER_INSTRUCTIONS =
   'portfolio_lot_write (its tax lots); adding one for a broker SnapTrade supports is refused. ' +
   'integration_write {provider: "alpaca", key_id, secret_key} makes live quotes and chains use ' +
   'your own Alpaca key. ' +
+  "Robinhood's agentic-trading sign-in is connected by a person in the app (Settings > Integrations); " +
+  'integration_list shows it with the Agentic account it can trade in. ' +
   'Track margin cash per account as a position: underlying "MARGIN-CASH", quantity = minus the ' +
   'margin borrowed in USD, avg_cost 1, e.g. {underlying: "MARGIN-CASH", quantity: -12500, avg_cost: 1}; ' +
   'it is always priced at $1, so its value is the debt and it never shows a gain or loss. ' +

@@ -1,5 +1,6 @@
 import { refreshHeaders } from '@edgedesk/app-shell';
 import type { OptionChain, OptionQuote, UnderlyingQuote } from '@edgedesk/types';
+import type { SymbolRead } from '@edgedesk/types/symbols';
 import type { CustomView, CustomViewConfig } from '@edgedesk/types/views';
 import { keepPreviousData, queryOptions } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
@@ -228,6 +229,8 @@ export interface TaxLot {
   term: 'short' | 'long';
   /** Set when the cost is not the lot's own: yours, a transaction's price, the close that day, or none. */
   cost_from?: 'yours' | 'transaction' | 'estimate' | 'missing';
+  /** Shares held before the history starts (no buy on record): no cost until you set one. */
+  before_history?: true;
   /** Where the holding's lots come from: the broker (SnapTrade), entered (manual) or FIFO (derived). */
   source: LotSource;
 }
@@ -242,20 +245,34 @@ export interface ClosedLot {
   closed: string;
   /** Negative for a short lot. */
   quantity: number;
-  cost: number;
+  /** null for shares transferred in: brokers send no cost with them. */
+  cost: number | null;
   proceeds: number;
-  gain: number;
+  /** null when the cost is unknown. */
+  gain: number | null;
   term: 'short' | 'long';
+  /** Shares held before the history starts: `acquired` is the first row's day. */
+  before_history?: true;
 }
 export type LotSource = 'snaptrade' | 'derived' | 'manual';
+export interface LotCheck {
+  symbol: string;
+  kind: 'quantity' | 'cost';
+  held: number;
+  in_lots: number;
+  /** Shares, open or sold, with no cost on record. */
+  no_cost: number;
+  source: LotSource;
+}
 export interface Portfolio extends Omit<PortfolioSummary, 'positions'> {
   positions: Position[];
   lots: TaxLot[];
-  realized_ytd: { total: number; short_term: number };
+  /** This year's closed gain; `sold` is this year's proceeds, `no_cost` those whose gain is unknown. */
+  realized_ytd: { total: number; short_term: number; sold: number; no_cost: number };
   /** Every lot closed so far, FIFO from the buys and sells. */
   closed_lots: ClosedLot[];
-  /** Holdings whose open lots miss the held quantity. */
-  checks: { symbol: string; held: number; in_lots: number; source: LotSource }[];
+  /** Per symbol held or sold: `quantity` when open lots miss what is held, `cost` when shares have no cost. */
+  checks: LotCheck[];
   /** Dividends per symbol, in USD: every one on record and this year's. */
   dividends: { symbol: string; total: number; ytd: number }[];
 }
@@ -305,9 +322,17 @@ export const allTransactionsQuery = () =>
 
 // ── Portfolio views (the shared custom view store): app views first, then the person's own ──
 
-/** The portfolio's view domains: holdings rows and transaction rows. */
-export type PortfolioDomain = 'holdings' | 'transactions' | 'tax_lots';
-export const PORTFOLIO_DOMAINS: PortfolioDomain[] = ['holdings', 'transactions', 'tax_lots'];
+/**
+ * The portfolio's view domains: holdings, transactions, tax lots and accounts (the Portfolio
+ * section), and symbols (stock screens, the Symbols section; Bikram, 2026-10-12).
+ */
+export type PortfolioDomain = 'holdings' | 'transactions' | 'tax_lots' | 'accounts' | 'symbols';
+export const PORTFOLIO_DOMAINS: PortfolioDomain[] = [
+  'holdings',
+  'transactions',
+  'tax_lots',
+  'accounts',
+];
 export type PortfolioView = CustomView & { domain: PortfolioDomain };
 
 export const portfolioViewsQuery = (domain: PortfolioDomain) =>
@@ -331,14 +356,37 @@ export const savePortfolioView = (
     config,
   });
 /** Where a view opens: the app views at their own paths, a person's under `/portfolio/views`. */
-export const portfolioViewPath = (v: { app?: boolean; domain: string; id: string }) =>
-  v.app
-    ? v.domain === 'transactions'
-      ? '/portfolio/transactions'
-      : v.domain === 'tax_lots'
-        ? '/portfolio/tax-lots'
-        : '/portfolio'
-    : `/portfolio/views/${v.domain}/${v.id}`;
+export const portfolioViewPath = (v: { app?: boolean; domain: string; id: string }) => {
+  if (v.domain === 'symbols') return v.app ? '/symbols' : `/symbols/views/${v.id}`;
+  if (!v.app) return `/portfolio/views/${v.domain}/${v.id}`;
+  return v.domain === 'transactions'
+    ? '/portfolio/transactions'
+    : v.domain === 'tax_lots'
+      ? '/portfolio/tax-lots'
+      : v.domain === 'accounts'
+        ? '/portfolio/accounts'
+        : '/portfolio';
+};
+
+// ── Symbol fields (Bikram, 2026-10-12): live from the person's Robinhood sign-in, plus DataEdge ──
+
+/** Facts per symbol (P/E, analysts, earnings, technicals); nothing is saved, the server holds 5 minutes. */
+export const symbolsQuery = (symbols: string[]) =>
+  queryOptions({
+    queryKey: ['symbols', symbols.join(',')],
+    queryFn: () => send<SymbolRead>('POST', '/api/v1/symbols', { symbols }),
+    enabled: symbols.length > 0,
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData,
+  });
+/** DataEdge's symbol list, for the Symbols rows' `in:DataEdge`. */
+export const dataedgeSymbolsQuery = (on = true) =>
+  queryOptions({
+    queryKey: ['symbols', 'dataedge'],
+    queryFn: async () => (await getJson<{ symbols: string[] }>('/api/v1/symbols/dataedge')).symbols,
+    enabled: on,
+    staleTime: 60 * 60_000,
+  });
 export const deletePortfolioView = (domain: PortfolioDomain, id: string) =>
   send<{ deleted: string }>('DELETE', `/api/v1/custom-views/${domain}/${enc(id)}`);
 
@@ -471,11 +519,17 @@ export interface SyncReport {
 }
 export interface SnapTradeAccount {
   id: string;
+  /** The person's own name for it, else the broker's. */
   name: string;
+  broker_name: string;
   number: string;
   import: boolean;
   tax_type: TaxType;
   portfolio_id: string | null;
+  /** Who can send its orders (null: read-only) and why (Bikram, 2026-10-12). */
+  trading: { via: 'snaptrade' | 'robinhood' | null; note: string };
+  /** The person lets TradeEdge send orders here (baskets' autopilot); off by default. */
+  trade: boolean;
 }
 export interface SnapTradeBroker {
   id: string;
@@ -493,6 +547,7 @@ export type SnapTradeStatus =
       webhook_url: string;
       last_sync: SyncReport | null;
       last_event: { at: string; type: string } | null;
+      last_test: KeyTest | null;
       /** Null when read without asking SnapTrade (`live` false). */
       brokers: SnapTradeBroker[] | null;
       /** SnapTrade could not be reached. */
@@ -500,8 +555,31 @@ export type SnapTradeStatus =
     };
 export interface IntegrationsStatus {
   snaptrade: SnapTradeStatus;
-  alpaca: { connected: false } | { connected: true; key_id: string; saved_at: string };
+  alpaca:
+    | { connected: false }
+    | { connected: true; key_id: string; saved_at: string; last_test: KeyTest | null };
+  robinhood: RobinhoodStatus;
 }
+/** A key's last test: one cheap read with it (Bikram, 2026-10-12). */
+export interface KeyTest {
+  at: string;
+  ok: boolean;
+  /** What the read returned when it worked, e.g. `3 accounts` or `SPY $512.30`. */
+  detail: string | null;
+  error: string | null;
+}
+export interface RobinhoodTest {
+  at: string;
+  ok: boolean;
+  /** The Agentic account, masked. */
+  account: string | null;
+  /** true: each order waits for the person's tap in Robinhood's app. */
+  approvals: boolean | null;
+  error: string | null;
+}
+export type RobinhoodStatus =
+  | { connected: false }
+  | { connected: true; connected_at: string; last_test: RobinhoodTest | null };
 /** `live` false reads only what is stored (the header's sync status), without asking SnapTrade. */
 export const integrationsQuery = (live = true) =>
   queryOptions({
@@ -511,6 +589,8 @@ export const integrationsQuery = (live = true) =>
   });
 export const saveSnapTradeKey = (key: { client_id: string; consumer_key: string }) =>
   send<IntegrationsStatus>('PUT', '/api/v1/integrations/snaptrade', key);
+export const testSnapTrade = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/snaptrade/test', {});
 export const deleteSnapTradeKey = () =>
   send<{ ok: true }>('DELETE', '/api/v1/integrations/snaptrade');
 export const syncSnapTrade = () =>
@@ -518,11 +598,29 @@ export const syncSnapTrade = () =>
 /** SnapTrade's own portal: a new broker, or `reconnect` (a broker id) to sign in again. */
 export const snaptradePortal = (reconnect?: string) =>
   send<{ url: string }>('POST', '/api/v1/integrations/snaptrade/portal', { reconnect });
-export const setSnapTradeAccount = (id: string, change: { import?: boolean; tax_type?: TaxType }) =>
-  send<IntegrationsStatus>('PUT', `/api/v1/integrations/snaptrade/accounts/${enc(id)}`, change);
+export const setSnapTradeAccount = (
+  id: string,
+  change: { import?: boolean; tax_type?: TaxType; name?: string | null },
+) => send<IntegrationsStatus>('PUT', `/api/v1/integrations/snaptrade/accounts/${enc(id)}`, change);
+/** Lets TradeEdge send orders to an account, or stops it (app only). */
+export const setAccountTrade = (id: string, trade: boolean) =>
+  send<IntegrationsStatus>('PUT', `/api/v1/integrations/snaptrade/accounts/${enc(id)}/trade`, {
+    trade,
+  });
 export const saveAlpacaKey = (key: { key_id: string; secret_key: string }) =>
   send<IntegrationsStatus>('PUT', '/api/v1/integrations/alpaca', key);
+export const testAlpaca = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/alpaca/test', {});
 export const deleteAlpacaKey = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/alpaca');
+/** Robinhood's sign-in page for this person (opened in a new tab; it ends on a localhost address). */
+export const connectRobinhood = () =>
+  send<{ url: string }>('POST', '/api/v1/integrations/robinhood/connect', {});
+/** Finishes a sign-in with the localhost address Robinhood sent the browser to. */
+export const finishRobinhood = (url: string) =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/robinhood/finish', { url });
+export const testRobinhood = () =>
+  send<IntegrationsStatus>('POST', '/api/v1/integrations/robinhood/test', {});
+export const deleteRobinhood = () => send<{ ok: true }>('DELETE', '/api/v1/integrations/robinhood');
 
 // ── Manual accounts (brokers SnapTrade can't reach) ──
 
@@ -554,6 +652,11 @@ export interface LotInput {
   quantity: number;
   cost: number;
 }
+/** Your cost per share for a symbol's lots acquired on one day (null clears it). */
+export const writeLotCost = (
+  portfolioId: string,
+  cost: { underlying: string; acquired: string; cost: number | null },
+) => send<Portfolio>('PUT', `/api/v1/portfolios/${enc(portfolioId)}/lot-costs`, cost);
 export const writeLots = (portfolioId: string, lots: LotInput[]) =>
   send<Portfolio>('PUT', `/api/v1/portfolios/${enc(portfolioId)}/lots`, { lots });
 export interface TransactionInput {

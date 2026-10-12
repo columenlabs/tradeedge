@@ -314,7 +314,8 @@ export function SettingsDialog({
           <section
             ref={pane}
             aria-label="Search results"
-            className="flex min-w-0 flex-1 flex-col gap-6 overflow-y-auto p-4 md:p-6"
+            // The top band on desktop keeps results clear of the dialog's X.
+            className="flex min-w-0 flex-1 flex-col gap-6 overflow-y-auto px-4 pt-4 pb-8 md:mt-12 md:border-t md:px-6 md:pt-6"
           >
             {all.map((s) => {
               const whole = matches(q, s.title, s.description);
@@ -345,11 +346,16 @@ export function SettingsDialog({
         ) : (
           <section
             aria-labelledby={`settings-${current.id}-title`}
-            className="flex min-w-0 flex-1 flex-col gap-3 overflow-y-auto p-4 md:p-6"
+            className="flex min-h-0 min-w-0 flex-1 flex-col"
           >
-            {header(current)}
-            <Separator />
-            {current.content}
+            {/* Header stays put; only the body scrolls, so content never runs under the X. */}
+            <div className="flex shrink-0 flex-col gap-3 px-4 pt-4 md:px-6 md:pt-6">
+              {header(current)}
+              <Separator />
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 pt-3 pb-8 md:px-6">
+              {current.content}
+            </div>
           </section>
         )}
       </DialogContent>

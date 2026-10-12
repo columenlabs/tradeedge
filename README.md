@@ -25,7 +25,7 @@ You need:
 |---|---|
 | App, REST API (`/api/v1`), MCP (`/mcp`) | yes |
 | Sign-in | Cloudflare Access, in front of the whole app |
-| Your data | in your own D1 database, every person's rows encrypted with your `VAULT_KEK` |
+| Your data | in your own D1 database; encrypted per person only if you set `VAULT_KEK` (off by default) |
 | Live quotes and chains | your Alpaca key |
 | Broker holdings and tax lots | your SnapTrade Personal key (free, up to 5 brokers; tax lots for eligible brokers) |
 | Historical option chains | no (`/api/v1/history/*` answers 503) |
@@ -37,7 +37,7 @@ bun install
 cd services/analytics-engine
 wrangler d1 create tradeedge          # put the id in wrangler.jsonc under d1_databases
 wrangler d1 migrations apply tradeedge --remote
-wrangler secret put VAULT_KEK           # 32 random bytes, base64: openssl rand -base64 32
+wrangler secret put VAULT_KEK           # optional, turns encryption on: openssl rand -base64 32
 wrangler secret put ALPACA_API_KEY_ID
 wrangler secret put ALPACA_API_SECRET_KEY
 wrangler deploy                         # builds the app first (scripts/assemble-trade-assets.sh)
@@ -53,6 +53,12 @@ Then put the Worker behind a Cloudflare Access application and set these vars (d
 | `ACCESS_AUD`, `ACCESS_APP_AUD` | the Access application's audience (AUD) tag |
 
 Until the Access vars are set, every signed-in route answers 503. Leave `/api/public/snaptrade-hook/*` outside Access so SnapTrade's webhook reaches it (it checks SnapTrade's signature).
+
+### Encryption (your choice)
+
+- **Off** (no `VAULT_KEK`, the default): rows are stored readable in your D1, including your SnapTrade, Alpaca and Robinhood keys.
+- **On** (`VAULT_KEK` set): every person's rows, keys included, are encrypted, so reading D1 shows nothing useful.
+- Turning it on later: set `VAULT_KEK` and redeploy. On its first start the app encrypts every existing row once. There is no way to turn it back off.
 
 Keep a copy of `VAULT_KEK`: without it the data in D1 can't be read.
 

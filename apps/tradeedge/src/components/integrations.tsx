@@ -1,24 +1,34 @@
 // Settings ▸ Integrations (Bikram, 2026-10-10): the services TradeEdge connects to with the person's
-// own keys, one list, each row expanding in place: SnapTrade (key, sync, webhook) and Alpaca (live
-// data key). Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
+// own keys, one list, each row expanding in place (all collapsed at first; Bikram, 2026-10-12): SnapTrade (key, sync, webhook) and Alpaca (live
+// data key), plus Robinhood (Bikram, 2026-10-12: OAuth sign-in to its agentic-trading MCP). Settings ▸ Brokers and accounts (Bikram, 2026-10-11) holds what the person holds: the
 // SnapTrade brokers with their accounts, and Manual accounts (only brokers SnapTrade can't reach).
 // Brokers are linked in SnapTrade's own portal, in a new tab.
 import {
   type IntegrationsStatus,
+  type KeyTest,
   type Portfolio,
+  type RobinhoodStatus,
+  type SnapTradeAccount,
   type SnapTradeBroker,
   type SyncReport,
   type TaxType,
+  connectRobinhood,
   deleteAlpacaKey,
   deletePortfolio,
+  deleteRobinhood,
   deleteSnapTradeKey,
+  finishRobinhood,
   holdingsAccountsQuery,
   integrationsQuery,
   saveAlpacaKey,
   saveSnapTradeKey,
+  setAccountTrade,
   setSnapTradeAccount,
   snaptradePortal,
   syncSnapTrade,
+  testAlpaca,
+  testRobinhood,
+  testSnapTrade,
   writeLots,
   writeManualAccount,
   writeTransactions,
@@ -54,6 +64,14 @@ import {
   SelectValue,
 } from '@edgedesk/app-shell/ui/select';
 import { Switch } from '@edgedesk/app-shell/ui/switch';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@edgedesk/app-shell/ui/table';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangleIcon,
@@ -63,13 +81,15 @@ import {
   ExternalLinkIcon,
   LandmarkIcon,
   LinkIcon,
+  PencilIcon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
   Trash2Icon,
   UploadIcon,
 } from 'lucide-react';
-import { type ReactNode, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 const SNAPTRADE_DASHBOARD = 'https://dashboard.snaptrade.com';
 
@@ -267,84 +287,195 @@ function usePortal() {
   });
 }
 
+/** An account's name, renamed in place (Bikram, 2026-10-11): Enter or leaving the field saves; empty
+ *  goes back to the broker's own name, shown as the placeholder. */
+function AccountName({
+  account,
+  onSave,
+}: { account: SnapTradeAccount; onSave: (name: string | null) => void }) {
+  const [typed, setTyped] = useState(account.name);
+  const save = () => {
+    const name = typed.trim();
+    if (name === account.name) return;
+    if (!name && account.name === account.broker_name) return setTyped(account.name);
+    onSave(name || null);
+  };
+  return (
+    <InputGroup className="-ml-2 h-7 w-fit max-w-full border-transparent hover:border-input dark:bg-transparent">
+      <InputGroupInput
+        value={typed}
+        placeholder={account.broker_name}
+        aria-label={`Rename ${account.name}`}
+        title={
+          account.name === account.broker_name ? 'Rename' : `At the broker: ${account.broker_name}`
+        }
+        onChange={(e) => setTyped(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') {
+            setTyped(account.name);
+            requestAnimationFrame(() => e.currentTarget?.blur());
+          }
+        }}
+        className="field-sizing-content min-w-0 px-2 text-sm"
+      />
+      <InputGroupAddon align="inline-end">
+        <PencilIcon className="size-3" />
+        {account.name !== account.broker_name && (
+          <InputGroupButton
+            size="icon-xs"
+            aria-label={`Reset to ${account.broker_name}`}
+            title={`Reset to ${account.broker_name}`}
+            onClick={() => onSave(null)}
+          >
+            <RotateCcwIcon />
+          </InputGroupButton>
+        )}
+      </InputGroupAddon>
+    </InputGroup>
+  );
+}
+
 function BrokerBlock({ broker }: { broker: SnapTradeBroker }) {
   const qc = useQueryClient();
   const portal = usePortal();
   const [leaving, setLeaving] = useState<string | null>(null);
   const change = useMutation({
-    mutationFn: ({ id, ...c }: { id: string; import?: boolean; tax_type?: TaxType }) =>
+    mutationFn: ({
+      id,
+      ...c
+    }: { id: string; import?: boolean; tax_type?: TaxType; name?: string | null }) =>
       setSnapTradeAccount(id, c),
     onSuccess: (data) => {
       qc.setQueryData(integrationsQuery().queryKey, data);
       void qc.invalidateQueries({ queryKey: ['portfolios'] });
     },
   });
+  const trade = useMutation({
+    mutationFn: ({ id, on }: { id: string; on: boolean }) => setAccountTrade(id, on),
+    onSuccess: (data) => qc.setQueryData(integrationsQuery().queryKey, data),
+  });
   const leavingAccount = broker.accounts.find((a) => a.id === leaving);
   return (
     <div className="overflow-hidden rounded-md border">
-      <div className="flex items-center gap-2 bg-muted/60 px-3 py-2">
-        <span className="flex-1 font-medium">{broker.name}</span>
-        {broker.broken ? (
-          <>
-            <Badge variant="outline" className="text-warning">
-              <AlertTriangleIcon />
-              Sign in again
-            </Badge>
-            <Button size="sm" variant="outline" onClick={() => portal.mutate(broker.id)}>
-              <LinkIcon />
-              Reconnect
-            </Button>
-          </>
-        ) : (
-          <Badge variant="outline" className="text-gain">
-            <CheckIcon />
-            Connected
-          </Badge>
-        )}
-      </div>
-      {broker.accounts.map((a) => (
-        <div
-          key={a.id}
-          className="grid grid-cols-[minmax(0,1fr)_6.5rem_auto] items-center gap-x-2 border-t px-3 py-2 sm:grid-cols-[minmax(0,1fr)_4rem_8.5rem_auto] sm:gap-x-3"
-        >
-          <span className="truncate text-sm">{a.name}</span>
-          <span className="num hidden text-xs text-muted-foreground sm:block">{a.number}</span>
-          <Select
-            value={a.tax_type}
-            onValueChange={(v) => change.mutate({ id: a.id, tax_type: v as TaxType })}
-            disabled={!a.import}
-          >
-            <SelectTrigger
-              size="sm"
-              aria-label={`${a.name} tax type`}
-              className="w-full text-xs sm:text-sm"
+      <Table>
+        <TableHeader className="bg-muted/60">
+          <TableRow className="hover:bg-transparent">
+            <TableHead colSpan={5}>
+              <div className="flex items-center gap-2">
+                <span className="flex-1">{broker.name}</span>
+                {broker.broken ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    className="text-warning"
+                    onClick={() => portal.mutate(broker.id)}
+                  >
+                    <AlertTriangleIcon />
+                    Reconnect
+                  </Button>
+                ) : (
+                  <Badge variant="outline" className="text-gain">
+                    <CheckIcon />
+                    Connected
+                  </Badge>
+                )}
+              </div>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow className="text-xs text-muted-foreground hover:bg-transparent [&>td]:py-1">
+            <TableCell>Account</TableCell>
+            <TableCell className="hidden sm:table-cell">Number</TableCell>
+            <TableCell>Tax</TableCell>
+            <TableCell>Trading</TableCell>
+            <TableCell className="text-right">Holdings</TableCell>
+          </TableRow>
+          {broker.accounts.map((a) => (
+            <TableRow
+              key={a.id}
+              className={cn('[&>td]:py-0.5', !a.import && 'text-muted-foreground')}
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="taxable">Taxable</SelectItem>
-              <SelectItem value="retirement">Retirement</SelectItem>
-            </SelectContent>
-          </Select>
-          <Label
-            htmlFor={`hold-${a.id}`}
-            className="flex items-center gap-2 text-xs font-normal text-muted-foreground"
-          >
-            <span className="hidden sm:inline">In Holdings</span>
-            <Switch
-              id={`hold-${a.id}`}
-              checked={a.import}
-              aria-label={`${a.name} in Holdings`}
-              onCheckedChange={(on) =>
-                on ? change.mutate({ id: a.id, import: true }) : setLeaving(a.id)
-              }
-            />
-          </Label>
-        </div>
-      ))}
-      {!broker.accounts.length && (
-        <p className="border-t px-3 py-2 text-xs text-muted-foreground">No accounts yet.</p>
-      )}
+              <TableCell className="w-full max-w-0">
+                <AccountName
+                  key={a.name}
+                  account={a}
+                  onSave={(name) => change.mutate({ id: a.id, name })}
+                />
+              </TableCell>
+              <TableCell className="num hidden text-xs text-muted-foreground sm:table-cell">
+                {a.number}
+              </TableCell>
+              <TableCell>
+                <Select
+                  value={a.tax_type}
+                  onValueChange={(v) => change.mutate({ id: a.id, tax_type: v as TaxType })}
+                  disabled={!a.import}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    aria-label={`${a.name} tax type`}
+                    className="h-7 w-24 sm:w-28 border-transparent shadow-none hover:border-input dark:bg-transparent"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="taxable">Taxable</SelectItem>
+                    <SelectItem value="retirement">Retirement</SelectItem>
+                  </SelectContent>
+                </Select>
+              </TableCell>
+              <TableCell>
+                {a.trading.via ? (
+                  <span
+                    className="flex items-center gap-2 whitespace-nowrap"
+                    title={a.trading.note}
+                  >
+                    <Switch
+                      size="sm"
+                      checked={a.trade}
+                      disabled={trade.isPending}
+                      aria-label={`Let TradeEdge trade in ${a.name}`}
+                      onCheckedChange={(on) => trade.mutate({ id: a.id, on })}
+                    />
+                    <span className="hidden text-xs text-muted-foreground sm:inline">
+                      via {a.trading.via === 'robinhood' ? 'Robinhood' : 'SnapTrade'}
+                    </span>
+                  </span>
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="whitespace-nowrap text-muted-foreground"
+                    title={a.trading.note}
+                  >
+                    Read only
+                  </Badge>
+                )}
+              </TableCell>
+              <TableCell className="text-right">
+                <Switch
+                  size="sm"
+                  checked={a.import}
+                  aria-label={`${a.name} in Holdings`}
+                  title={a.import ? 'In Holdings' : 'Left out of Holdings'}
+                  onCheckedChange={(on) =>
+                    on ? change.mutate({ id: a.id, import: true }) : setLeaving(a.id)
+                  }
+                />
+              </TableCell>
+            </TableRow>
+          ))}
+          {!broker.accounts.length && (
+            <TableRow>
+              <TableCell colSpan={4} className="text-xs text-muted-foreground">
+                No accounts yet.
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
       <ConfirmDelete
         open={leaving !== null}
         onOpenChange={(o) => !o && setLeaving(null)}
@@ -353,7 +484,7 @@ function BrokerBlock({ broker }: { broker: SnapTradeBroker }) {
         action="Leave out"
         onConfirm={() => leaving && change.mutate({ id: leaving, import: false })}
       />
-      <ErrorLine error={change.error ?? portal.error} />
+      <ErrorLine error={change.error ?? trade.error ?? portal.error} />
     </div>
   );
 }
@@ -498,6 +629,7 @@ function SnapTradeConnected({
         </div>
       </Section>
       <Section title="Key">
+        <KeyTestLine test={st.last_test} run={testSnapTrade} />
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <span className="num">
             {st.client_id} · {st.consumer_key}
@@ -903,6 +1035,71 @@ function ManualAccounts({ onSnapTrade }: { onSnapTrade: () => void }) {
 
 // ── Alpaca ──
 
+// ── Key tests (Bikram, 2026-10-12): a saved key says nothing; each row shows whether it works ──
+
+/** The row's status: whether the key's last test worked. */
+function TestBadge({ test, ok = 'Works' }: { test: { ok: boolean } | null; ok?: string }) {
+  if (!test) return <Badge variant="outline">Not tested</Badge>;
+  return test.ok ? (
+    <Badge variant="outline" className="text-gain">
+      <CheckIcon />
+      {ok}
+    </Badge>
+  ) : (
+    <Badge variant="outline" className="text-loss">
+      <AlertTriangleIcon />
+      Failed
+    </Badge>
+  );
+}
+
+/** The last test's time and outcome, with the Test button that runs it again. */
+function KeyTestLine({
+  test,
+  run,
+}: {
+  test: KeyTest | null;
+  run: () => Promise<IntegrationsStatus>;
+}) {
+  const qc = useQueryClient();
+  const clock = useClock();
+  const m = useMutation({
+    mutationFn: run,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  return (
+    <div className="grid grid-cols-1 gap-1">
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        {test ? (
+          <span className={cn('flex min-w-0 items-center gap-2', !test.ok && 'text-loss')}>
+            {test.ok ? (
+              <CheckIcon className="size-4 shrink-0 text-gain" />
+            ) : (
+              <AlertTriangleIcon className="size-4 shrink-0" />
+            )}
+            <span className="truncate">
+              Tested {clock(test.at)} · {test.ok ? `works · ${test.detail}` : 'failed'}
+            </span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground">Not tested yet</span>
+        )}
+        <span className="flex-1" />
+        <Button size="sm" variant="outline" disabled={m.isPending} onClick={() => m.mutate()}>
+          <RefreshCwIcon className={cn(m.isPending && 'animate-spin')} />
+          {m.isPending ? 'Testing…' : 'Test'}
+        </Button>
+      </div>
+      {test && !test.ok && test.error ? (
+        <p role="alert" className="text-xs text-loss">
+          {test.error}
+        </p>
+      ) : null}
+      <ErrorLine error={m.error} />
+    </div>
+  );
+}
+
 function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
   const qc = useQueryClient();
   const clock = useClock();
@@ -926,24 +1123,27 @@ function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
   });
   if (status.connected)
     return (
-      <div className="flex flex-wrap items-center gap-3 text-sm">
-        <span className="num">{status.key_id}</span>
-        <span className="text-xs text-muted-foreground">
-          Live data uses your key · saved {clock(status.saved_at)}
-        </span>
-        <span className="flex-1" />
-        <ConfirmDelete
-          title="Disconnect Alpaca?"
-          description="Your key is deleted and live data goes back to EdgeDesk's key."
-          action="Disconnect"
-          onConfirm={() => remove.mutate()}
-        >
-          <Button size="sm" variant="destructive">
-            <Trash2Icon />
-            Disconnect
-          </Button>
-        </ConfirmDelete>
-        <ErrorLine error={remove.error} />
+      <div className="grid grid-cols-1 gap-3">
+        <KeyTestLine test={status.last_test} run={testAlpaca} />
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="num">{status.key_id}</span>
+          <span className="text-xs text-muted-foreground">
+            Live data uses your key · saved {clock(status.saved_at)}
+          </span>
+          <span className="flex-1" />
+          <ConfirmDelete
+            title="Disconnect Alpaca?"
+            description="Your key is deleted and live data goes back to EdgeDesk's key."
+            action="Disconnect"
+            onConfirm={() => remove.mutate()}
+          >
+            <Button size="sm" variant="destructive">
+              <Trash2Icon />
+              Disconnect
+            </Button>
+          </ConfirmDelete>
+          <ErrorLine error={remove.error} />
+        </div>
       </div>
     );
   return (
@@ -997,11 +1197,160 @@ function Alpaca({ status }: { status: IntegrationsStatus['alpaca'] }) {
   );
 }
 
+// ── Robinhood ──
+
+function Robinhood({ status }: { status: RobinhoodStatus }) {
+  const qc = useQueryClient();
+  const clock = useClock();
+  const [pasted, setPasted] = useState('');
+  const connect = useMutation({
+    // Robinhood's sign-in opens in a new tab (Bikram, 2026-10-12), opened before the request so the
+    // browser does not block it; this tab re-reads the status when it gets focus back.
+    mutationFn: async () => {
+      const tab = window.open('', '_blank');
+      try {
+        const { url } = await connectRobinhood();
+        if (tab) tab.location.href = url;
+        else window.location.href = url;
+      } catch (err) {
+        tab?.close();
+        throw err;
+      }
+    },
+  });
+  const finish = useMutation({
+    mutationFn: () => finishRobinhood(pasted.trim()),
+    onSuccess: (data) => {
+      qc.setQueryData(integrationsQuery().queryKey, data);
+      connect.reset();
+      setPasted('');
+    },
+  });
+  const test = useMutation({
+    mutationFn: testRobinhood,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  const remove = useMutation({
+    mutationFn: deleteRobinhood,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['integrations'] }),
+  });
+  // Robinhood returns a sign-in only to localhost (Bikram, 2026-10-12): it ends on a page that can't
+  // load, and the person pastes that page's address here so TradeEdge finishes the sign-in.
+  const pasteBack = (
+    <form
+      className="grid grid-cols-1 gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (pasted.trim()) finish.mutate();
+      }}
+    >
+      <Field id="rh-url" label="Address of the page that couldn't load">
+        <Input
+          id="rh-url"
+          className="num"
+          autoComplete="off"
+          placeholder="http://localhost:8765/tradeedge/robinhood?code=…"
+          value={pasted}
+          onChange={(e) => setPasted(e.target.value)}
+        />
+      </Field>
+      <ErrorLine error={finish.error} />
+      <Button
+        type="submit"
+        size="sm"
+        className="justify-self-end"
+        disabled={!pasted.trim() || finish.isPending}
+      >
+        {finish.isPending ? <RefreshCwIcon className="animate-spin" /> : <CheckIcon />}
+        {finish.isPending ? 'Connecting…' : 'Finish'}
+      </Button>
+    </form>
+  );
+  const steps = (
+    <ol className="grid list-decimal grid-cols-1 gap-1 pl-5 text-sm">
+      <li>Tap Connect. Robinhood's sign-in opens in a new tab.</li>
+      <li>Sign in and approve TradeEdge.</li>
+      <li>
+        Robinhood then opens a page that can't load (it starts with{' '}
+        <span className="num">localhost</span>). That is expected.
+      </li>
+      <li>Copy that page's whole address, paste it below and tap Finish.</li>
+    </ol>
+  );
+  const connectButton = (label: string) => (
+    <Button size="sm" disabled={connect.isPending} onClick={() => connect.mutate()}>
+      {connect.isPending ? <RefreshCwIcon className="animate-spin" /> : <LinkIcon />}
+      {label}
+    </Button>
+  );
+  if (!status.connected)
+    return (
+      <div className="grid grid-cols-1 gap-3">
+        <p className="text-sm">
+          Sign in with Robinhood so TradeEdge can reach your Agentic account. It can trade only in
+          that account; your other Robinhood accounts stay read-only. You sign in on Robinhood's
+          page, and EdgeDesk never sees your password.
+        </p>
+        {steps}
+        <ErrorLine error={connect.error} />
+        <div className="justify-self-start">{connectButton('Connect')}</div>
+        {pasteBack}
+      </div>
+    );
+  const t = status.last_test;
+  return (
+    <div className="grid grid-cols-1 gap-3 text-sm">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+        <dt className="text-muted-foreground">Agentic account</dt>
+        <dd className="num">{t?.account ?? '—'}</dd>
+        <dt className="text-muted-foreground">Approvals in Robinhood app</dt>
+        <dd>{t?.approvals == null ? '—' : t.approvals ? 'On' : 'Off'}</dd>
+        <dt className="text-muted-foreground">Connected</dt>
+        <dd>{status.connected_at ? clock(status.connected_at) : '—'}</dd>
+        {t && (
+          <>
+            <dt className="text-muted-foreground">Last test</dt>
+            <dd className={cn(!t.ok && 'text-loss')}>
+              {clock(t.at)} · {t.ok ? 'OK' : t.error}
+            </dd>
+          </>
+        )}
+      </dl>
+      {connect.isSuccess && (
+        <>
+          {steps}
+          {pasteBack}
+        </>
+      )}
+      <ErrorLine error={test.error ?? remove.error ?? connect.error} />
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" disabled={test.isPending} onClick={() => test.mutate()}>
+          <RefreshCwIcon className={cn(test.isPending && 'animate-spin')} />
+          Test
+        </Button>
+        {test.error || (t && !t.ok) ? connectButton('Sign in again') : null}
+        <span className="flex-1" />
+        <ConfirmDelete
+          title="Disconnect Robinhood?"
+          description="TradeEdge forgets its Robinhood sign-in and can no longer reach your Agentic account."
+          action="Disconnect"
+          onConfirm={() => remove.mutate()}
+        >
+          <Button size="sm" variant="destructive">
+            <Trash2Icon />
+            Disconnect
+          </Button>
+        </ConfirmDelete>
+      </div>
+    </div>
+  );
+}
+
 // ── the section ──
 
 function Integrations() {
   const q = useQuery(integrationsQuery());
-  const [open, setOpen] = useState<string | null>('snaptrade');
+  const [open, setOpen] = useState<string | null>(null);
   const toggle = (id: string) => (o: boolean) => setOpen(o ? id : null);
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading…</p>;
   if (q.isError) return <ErrorLine error={q.error} />;
@@ -1023,11 +1372,13 @@ function Integrations() {
               <AlertTriangleIcon />
               {broken} needs sign-in
             </Badge>
+          ) : st.last_test?.ok === false ? (
+            <TestBadge test={st.last_test} />
           ) : (
-            <Badge variant="outline" className="text-gain">
-              <CheckIcon />
-              {brokers.length} broker{brokers.length === 1 ? '' : 's'}
-            </Badge>
+            <TestBadge
+              test={st.last_test}
+              ok={`Works · ${brokers.length} broker${brokers.length === 1 ? '' : 's'}`}
+            />
           )
         }
       >
@@ -1040,16 +1391,28 @@ function Integrations() {
         onOpenChange={toggle('alpaca')}
         badge={
           q.data.alpaca.connected ? (
-            <Badge variant="outline" className="text-gain">
-              <CheckIcon />
-              Your key
-            </Badge>
+            <TestBadge test={q.data.alpaca.last_test} />
           ) : (
             <Badge variant="outline">Not connected</Badge>
           )
         }
       >
         <Alpaca status={q.data.alpaca} />
+      </IntegrationRow>
+      <IntegrationRow
+        name="Robinhood"
+        meta="Agentic account · trading sign-in"
+        open={open === 'robinhood'}
+        onOpenChange={toggle('robinhood')}
+        badge={
+          !q.data.robinhood.connected ? (
+            <Badge variant="outline">Not connected</Badge>
+          ) : (
+            <TestBadge test={q.data.robinhood.last_test} />
+          )
+        }
+      >
+        <Robinhood status={q.data.robinhood} />
       </IntegrationRow>
     </div>
   );
@@ -1113,19 +1476,20 @@ function BrokersAndAccounts() {
 }
 
 export const INTEGRATION_SETTINGS: SettingsSectionDef[] = [
+  // Integrations first, then what they bring in (Bikram, 2026-10-12).
+  {
+    id: 'integrations',
+    title: 'Integrations',
+    icon: PlugIcon,
+    description: 'SnapTrade, Alpaca and Robinhood, with your own sign-ins.',
+    content: <Integrations />,
+  },
   {
     id: 'accounts',
     title: 'Brokers and accounts',
     icon: LandmarkIcon,
     description: 'Your brokers, their accounts and manual accounts.',
     content: <BrokersAndAccounts />,
-  },
-  {
-    id: 'integrations',
-    title: 'Integrations',
-    icon: PlugIcon,
-    description: 'SnapTrade and Alpaca, with your own keys.',
-    content: <Integrations />,
   },
 ];
 

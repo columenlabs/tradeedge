@@ -36,6 +36,18 @@ export interface AssetLookup {
   getAsset(symbol: string): Promise<AssetInfo | null>;
 }
 
+/** A stock split: from `date` (the ex-date) on, one old share is `ratio` new ones (10 for 10:1, 0.02 for 1:50). */
+export interface Split {
+  symbol: string;
+  date: string;
+  ratio: number;
+}
+
+/** Stock splits of many tickers since `from` (YYYY-MM-DD). Throws `ProviderError` when the provider fails. */
+export interface SplitLookup {
+  getSplits(symbols: string[], from: string): Promise<Split[]>;
+}
+
 export class ProviderError extends Error {
   constructor(
     message: string,

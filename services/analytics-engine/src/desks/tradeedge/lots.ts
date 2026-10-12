@@ -5,12 +5,26 @@
  *    (`manual`, portfolio_lot_write) or, when neither has any for it, `derived` first-in first-out
  *    from its buys and sells.
  * 2. A stored lot takes its holding's side: long lots for a long holding, short for a short one.
- * 3. Lots and checks cover what is held now. A check is held minus lots, per holding, with the
- *    source that explains the gap. A stock sold out this year whose sells outrun its buys on record
- *    gets a check too (held 0), so a sale with no buy never drops out of the realized total silently.
- * 4. Realized gains and closed lots always come from the buys and sells, first-in first-out. An option
- *    trade sent without its contract lots under the contract its description names, never as shares.
- * 5. Dividends add up per symbol from the dividend transactions: all of them and this year's.
+ * 3. Every share sits in one lot, open or closed (Bikram, 2026-10-12, plan A: matching exists so
+ *    realized gains are right). The rows of a share symbol are anchored to what is held now: shares
+ *    the history cannot explain (bought before it starts, or a row the broker never sent) open the
+ *    history as one lot "before history" with no cost, so a sale with no buy on record closes that lot
+ *    instead of opening a short one. Rows that bring in more than is held (shares that left with no row)
+ *    take the rest out of the oldest lots, unsold. Derived open lots always add up to what is held.
+ * 4. Checks, for every symbol held or sold: `quantity` (red) when the open lots miss what is held,
+ *    which only stored lots (the broker's or yours) can do; `cost` (amber) for the shares, open or
+ *    sold, with no cost on record, whose gain the realized total leaves out until a cost is set.
+ *    A money market fund (a 5-letter ticker ending in XX: FDRXX, SPAXX) is cash: no lots, no check.
+ * 5. Realized gains and closed lots always come from the account's rows, first-in first-out, and
+ *    every row that moves shares counts: buys and sells, and transfers in and out (another broker,
+ *    a journal, a 401(k) fund exchange). A transfer realizes nothing. Shares transferred in carry no
+ *    cost (brokers send none). An option trade sent without its contract lots under the contract its
+ *    description names, never as shares; options are not anchored (selling one opens a short). Lots
+ *    are first-in first-out: wash-sale adjustments are not applied.
+ * 6. Dividends add up per symbol from the dividend transactions: all of them and this year's.
+ * 7. A stock split splits the derived lots acquired before it (more shares, the same total cost), so
+ *    shares bought before a split match the ones sold after it (KLAC 10:1, 2026-06-12). Brokers send
+ *    no split row and keep the old trades as printed.
  *
  * Pure: no storage, no network. `portfolio.ts` reads the account and hands everything in.
  */
@@ -28,6 +42,8 @@ export interface TaxLot {
   cost: number;
   /** long once held more than a year. */
   term: 'short' | 'long';
+  /** Shares held before the history starts (no buy on record): no cost until you set one. */
+  before_history?: true;
   /**
    * Set when the cost is not the lot's own (Bikram, 2026-10-11; RSU and transferred-in lots often
    * come with cost 0): `yours`, set with portfolio_lot_cost_write; `transaction`, the price of that
@@ -59,25 +75,39 @@ export interface ClosedLot {
   closed: string;
   /** Negative for a short lot. */
   quantity: number;
-  /** What was paid in USD, fees included (what a short lot paid to buy back). */
-  cost: number;
+  /** What was paid in USD, fees included (what a short lot paid to buy back); null for shares transferred in. */
+  cost: number | null;
   /** What was received in USD, fees included (what a short lot was sold for). */
   proceeds: number;
-  gain: number;
+  /** null when the cost is unknown (shares transferred in). */
+  gain: number | null;
   /** long when held more than a year. */
   term: 'short' | 'long';
+  /** Shares held before the history starts (no buy on record): `acquired` is the first row's date. */
+  before_history?: true;
 }
 
 /** A holding whose open lots do not add up to the quantity held; `source` is where its lots come from. */
 export interface LotCheck {
   symbol: string;
+  /** `quantity`: the open lots miss what is held. `cost`: some shares, open or sold, have no cost. */
+  kind: 'quantity' | 'cost';
   held: number;
   in_lots: number;
+  /** Shares with no cost on record, open or sold (`cost` checks). */
+  no_cost: number;
   source: LotSource;
 }
 
 /** The close on `date`, or the last one before it within a week; null when there is none. */
 export type CloseOn = (symbol: string, date: string) => number | null;
+
+/** A stock split: from `date` (the ex-date) on, one old share is `ratio` new ones. */
+export interface StockSplit {
+  symbol: string;
+  date: string;
+  ratio: number;
+}
 
 /** What the lot math needs of a held position. */
 interface Held {
@@ -97,7 +127,8 @@ export interface Dividends {
 export interface AccountLots {
   lots: TaxLot[];
   checks: LotCheck[];
-  realized_ytd: { total: number; short_term: number };
+  /** This year's closed gain; `sold` is this year's proceeds and `no_cost` those whose gain is unknown. */
+  realized_ytd: { total: number; short_term: number; sold: number; no_cost: number };
   closed_lots: ClosedLot[];
   dividends: Dividends[];
 }
@@ -109,6 +140,16 @@ const yearBefore = (iso: string) => `${Number(iso.slice(0, 4)) - 1}${iso.slice(4
 const termOn = (acquired: string, day: string) =>
   acquired < yearBefore(day) ? ('long' as const) : ('short' as const);
 const OCC = /\d{6}[CP]\d{8}$/;
+/** A share or fund symbol, not an option contract (`ORCL 240 C` or an OCC symbol). */
+const isShare = (symbol: string) => !symbol.includes(' ') && !OCC.test(symbol);
+/** A money market fund (FDRXX, SPAXX): cash, so no lots and no check. */
+const CASH_FUND = /^[A-Z]{3}XX$/;
+/** The rows that move shares, and so lots. */
+export const MOVES = new Set(['buy', 'sell', 'transfer_in', 'transfer_out']);
+/** A row that adds shares (or covers a short). */
+const adds = (t: Transaction) => t.kind === 'buy' || t.kind === 'transfer_in';
+/** 1 for a row that should run after a day's share buys and moves in. */
+const later = (t: Transaction) => (adds(t) && isShare(t.symbol as string) ? 0 : 1);
 /**
  * An option trade the broker sent without its contract (Robinhood: symbol = the underlying, units =
  * contracts, "… ORCL call with strike of $240.00 … to open"). It is no share trade.
@@ -140,21 +181,30 @@ export function accountLots(a: {
   costs: LotCost[];
   close: CloseOn;
   skip: string;
+  /** Stock splits of the symbols traded, any order. */
+  splits?: StockSplit[];
   today?: Date;
 }): AccountLots {
   const today = (a.today ?? new Date()).toISOString().slice(0, 10);
   const trades = a.rows
-    .filter((t) => (t.kind === 'buy' || t.kind === 'sell') && t.symbol && t.quantity)
+    .filter((t) => MOVES.has(t.kind) && t.symbol && t.quantity && !CASH_FUND.test(t.symbol))
     .map(contractOf)
-    .sort((x, y) => (x.date === y.date ? (x.id < y.id ? -1 : 1) : x.date < y.date ? -1 : 1));
-  const fifo = firstInFirstOut(trades, today);
-
+    // Shares that come in on a day go before those that leave it: an RSU vest's sell-to-cover
+    // closes the vest's own lot, never a short one the vest then covers.
+    .sort(
+      (x, y) =>
+        (x.date < y.date ? -1 : x.date > y.date ? 1 : 0) ||
+        later(x) - later(y) ||
+        (x.id < y.id ? -1 : 1),
+    );
   const held = new Map(a.held.map((p) => [p.symbol, p.quantity]));
+  const fifo = firstInFirstOut(trades, today, a.splits ?? [], held, a.costs);
+
   const stored = group(a.stored ?? []);
   const derived = group(fifo.open);
-  // Lots belong to what is held now: buys and sells of anything else (a cash sweep fund, a sold
-  // position whose buy predates the history) leave no open lot and no check.
-  const symbols = [...held.keys()].filter((s) => s !== a.skip).sort();
+  // Open lots belong to what is held now; a cash sweep fund has none.
+  const counted = (s: string) => s !== a.skip && !CASH_FUND.test(s);
+  const symbols = [...held.keys()].filter(counted).sort();
   // An account with neither stored lots nor trades has nothing to check against.
   const checked = (a.stored?.length ?? 0) > 0 || trades.length > 0;
 
@@ -176,19 +226,29 @@ export function accountLots(a: {
     for (const l of mine) lots.push(costed({ ...l, term: termOn(l.acquired, today), source }, a));
     const inLots = shares(mine.reduce((s, l) => s + l.quantity, 0));
     if (checked && Math.abs(h - inLots) >= CHECK_STEP)
-      checks.push({ symbol, held: h, in_lots: inLots, source });
+      checks.push({ symbol, kind: 'quantity', held: h, in_lots: inLots, no_cost: 0, source });
   }
-  // Sold out this year with more sold than bought on record: the missing buy hides a gain or loss.
-  const year = today.slice(0, 4);
-  for (const [symbol, open] of derived) {
-    if (held.has(symbol) || symbol === a.skip || OCC.test(symbol) || symbol.includes(' ')) continue;
-    const left = shares(open.reduce((s, l) => s + l.quantity, 0));
-    const soldThisYear = trades.some(
-      (t) => t.symbol === symbol && t.kind === 'sell' && t.date.startsWith(year),
+  // Shares with no cost on record, held or sold: their gain is unknown (rule 4).
+  const noCost = new Map<string, number>();
+  const add = (symbol: string, q: number) => noCost.set(symbol, (noCost.get(symbol) ?? 0) + q);
+  for (const c of fifo.closed) if (c.gain === null) add(c.symbol, Math.abs(c.quantity));
+  for (const l of lots) if (l.cost_from === 'missing') add(l.symbol, Math.abs(l.quantity));
+  for (const [symbol, q] of [...noCost].sort(([x], [y]) => (x < y ? -1 : 1))) {
+    if (!counted(symbol) || shares(q) < CHECK_STEP) continue;
+    const inLots = shares(
+      lots.filter((l) => l.symbol === symbol).reduce((s, l) => s + l.quantity, 0),
     );
-    if (left <= -CHECK_STEP && soldThisYear)
-      checks.push({ symbol, held: 0, in_lots: left, source: 'derived' });
+    const source = lots.find((l) => l.symbol === symbol)?.source ?? 'derived';
+    checks.push({
+      symbol,
+      kind: 'cost',
+      held: held.get(symbol) ?? 0,
+      in_lots: inLots,
+      no_cost: shares(q),
+      source,
+    });
   }
+  const year = today.slice(0, 4);
   return {
     lots,
     checks,
@@ -245,6 +305,7 @@ function costed(l: TaxLot, a: { costs: LotCost[]; rows: Transaction[]; close: Cl
       (o) => o.symbol === l.symbol && o.acquired === l.acquired && o.quantity === undefined,
     );
   if (mine) return { ...l, cost: mine.cost, cost_from: 'yours' };
+  if (l.before_history) return { ...l, cost: 0, cost_from: 'missing' };
   if (l.cost > 0 || OCC.test(l.symbol)) return l;
   const same = a.rows.filter(
     (t) =>
@@ -260,59 +321,158 @@ function costed(l: TaxLot, a: { costs: LotCost[]; rows: Transaction[]; close: Cl
  * Open lots per symbol from the buys and sells: a trade first closes opposite lots oldest-first, the
  * rest opens a new lot. Closing part of a lot realizes its gain; short-term when held a year or less.
  */
-function firstInFirstOut(trades: Transaction[], today: string) {
-  const open = new Map<string, StoredLot[]>();
+function firstInFirstOut(
+  trades: Transaction[],
+  today: string,
+  splits: StockSplit[],
+  held: Map<string, number>,
+  costs: LotCost[],
+) {
+  // `unknown`: shares whose cost the broker never sent (transferred in, or before the history).
+  const open = new Map<string, (StoredLot & { unknown?: true })[]>();
+  // Each symbol's splits, oldest first; one is applied to the open lots once a trade (or today)
+  // is on or after its date.
+  const pending = group(
+    [...splits].filter((x) => x.date <= today).sort((x, y) => (x.date < y.date ? -1 : 1)),
+  );
+  // Your cost for an unknown lot (every lot that day of that symbol), else it stays unknown.
+  const yours = (symbol: string, acquired: string) =>
+    costs.find((o) => o.symbol === symbol && o.acquired === acquired && o.quantity === undefined);
+  // Rule 3: each share symbol starts from the shares its rows cannot explain against what is held
+  // now, as one lot before the history, in the units of the first row's day.
+  const gone = new Map<string, number>();
+  for (const [symbol, rows] of group(trades as (Transaction & { symbol: string })[])) {
+    if (!isShare(symbol)) continue;
+    const due = pending.get(symbol) ?? [];
+    const after = (day: string) => due.filter((x) => x.date > day).reduce((r, x) => r * x.ratio, 1);
+    const net = rows.reduce(
+      (s, t) => s + (adds(t) ? 1 : -1) * (t.quantity as number) * after(t.date),
+      0,
+    );
+    const gap = (held.get(symbol) ?? 0) - net;
+    const first = (rows[0] as Transaction).date;
+    // Splits on or before the first row's day are already in every row's units.
+    pending.set(
+      symbol,
+      due.filter((x) => x.date > first),
+    );
+    if (Math.abs(gap) < CHECK_STEP) continue;
+    // Rows that bring in more than is held: shares left with no row (a fee paid in coin, a move out
+    // the broker never sent). They leave the oldest lots after the walk; nothing is sold.
+    if (gap < 0 && (held.get(symbol) ?? 0) >= 0) {
+      gone.set(symbol, -gap);
+      continue;
+    }
+    const cost = yours(symbol, first);
+    open.set(symbol, [
+      {
+        symbol,
+        acquired: first,
+        quantity: shares(gap / after(first)),
+        cost: cost?.cost ?? 0,
+        before_history: true,
+        ...(cost ? {} : { unknown: true as const }),
+      },
+    ]);
+  }
+  const splitUpTo = (symbol: string, day: string) => {
+    const due = pending.get(symbol);
+    while (due?.[0] && due[0].date <= day) {
+      const { ratio } = due.shift() as StockSplit;
+      for (const lot of open.get(symbol) ?? []) {
+        lot.quantity = shares(lot.quantity * ratio);
+        lot.cost = Math.round((lot.cost / ratio) * 1e4) / 1e4;
+      }
+    }
+  };
   const year = today.slice(0, 4);
   const realized = { total: 0, short_term: 0 };
+  const sold = { total: 0, unknown: 0 };
   const closed: ClosedLot[] = [];
   for (const t of trades) {
     const symbol = t.symbol as string;
     const qty = t.quantity as number;
-    const sign = t.kind === 'buy' ? 1 : -1;
+    const sign = adds(t) ? 1 : -1;
+    const moved = t.kind === 'transfer_in' || t.kind === 'transfer_out';
     const mult = t.expiration || t.right ? 100 : 1;
     const perShare = (t.price ?? 0) + (sign * t.fees) / (qty * mult);
+    if (mult === 1) splitUpTo(symbol, t.date);
     const lots = open.get(symbol) ?? [];
     let left = sign * qty;
     while (left !== 0 && lots[0] && Math.sign(lots[0].quantity) !== Math.sign(left)) {
       const lot = lots[0];
       const take = Math.min(Math.abs(lot.quantity), Math.abs(left));
-      const gain = Math.sign(lot.quantity) * (perShare - lot.cost) * take * mult;
-      const term = termOn(lot.acquired, t.date);
-      if (t.date.startsWith(year)) {
-        realized.total += gain;
-        if (term === 'short') realized.short_term += gain;
+      // A transfer out moves the shares away: nothing is sold, nothing realized.
+      if (!moved) {
+        const gain = lot.unknown
+          ? null
+          : Math.sign(lot.quantity) * (perShare - lot.cost) * take * mult;
+        const term = termOn(lot.acquired, t.date);
+        if (gain !== null && t.date.startsWith(year)) {
+          realized.total += gain;
+          if (term === 'short') realized.short_term += gain;
+        }
+        const [paid, got] = lot.quantity > 0 ? [lot.cost, perShare] : [perShare, lot.cost];
+        closed.push({
+          symbol,
+          underlying: t.underlying ?? symbol,
+          expiration: t.expiration,
+          strike: t.strike,
+          right: t.right,
+          acquired: lot.acquired,
+          closed: t.date,
+          quantity: Math.sign(lot.quantity) * take,
+          cost: lot.unknown && lot.quantity > 0 ? null : cents(paid * take * mult),
+          proceeds: cents(got * take * mult),
+          gain: gain === null ? null : cents(gain),
+          term,
+          ...(lot.before_history ? { before_history: true as const } : {}),
+        });
+        if (t.date.startsWith(year)) {
+          sold.total += Math.abs(got * take * mult);
+          if (gain === null) sold.unknown += Math.abs(got * take * mult);
+        }
       }
-      const [paid, got] = lot.quantity > 0 ? [lot.cost, perShare] : [perShare, lot.cost];
-      closed.push({
-        symbol,
-        underlying: t.underlying ?? symbol,
-        expiration: t.expiration,
-        strike: t.strike,
-        right: t.right,
-        acquired: lot.acquired,
-        closed: t.date,
-        quantity: Math.sign(lot.quantity) * take,
-        cost: cents(paid * take * mult),
-        proceeds: cents(got * take * mult),
-        gain: cents(gain),
-        term,
-      });
       lot.quantity = shares(lot.quantity - Math.sign(lot.quantity) * take);
       left = shares(left - Math.sign(left) * take);
       if (lot.quantity === 0) lots.shift();
     }
-    if (left !== 0)
+    // The rest opens a lot. Shares sent out beyond the lots on record open a short one that a
+    // later move in covers (Fidelity sends one move as several rows: out, out, journal, in), so a
+    // share symbol's rows always add up to what is held; an option's just leave.
+    if (left !== 0 && (t.kind !== 'transfer_out' || isShare(symbol))) {
+      // No cost on record: shares moved, or a buy at 0 (an RSU vest, whose cost is its value).
+      const costless = moved || (t.kind === 'buy' && !t.price && mult === 1);
+      const mine = costless ? yours(symbol, t.date) : undefined;
       lots.push({
         symbol,
         acquired: t.date,
         quantity: left,
-        cost: Math.round(perShare * 1e4) / 1e4,
+        cost: costless ? (mine?.cost ?? 0) : Math.round(perShare * 1e4) / 1e4,
+        ...(costless && !mine ? { unknown: true as const } : {}),
       });
+    }
     open.set(symbol, lots);
   }
+  for (const symbol of open.keys()) if (isShare(symbol)) splitUpTo(symbol, today);
+  for (const [symbol, extra] of gone) {
+    const lots = open.get(symbol) ?? [];
+    let left = extra;
+    while (left > 0 && lots[0] && lots[0].quantity > 0) {
+      const take = Math.min(lots[0].quantity, left);
+      lots[0].quantity = shares(lots[0].quantity - take);
+      left = shares(left - take);
+      if (lots[0].quantity === 0) lots.shift();
+    }
+  }
   return {
-    open: [...open.values()].flat(),
-    realized: { total: cents(realized.total), short_term: cents(realized.short_term) },
+    open: [...open.values()].flat().map(({ unknown: _, ...l }) => l),
+    realized: {
+      total: cents(realized.total),
+      short_term: cents(realized.short_term),
+      sold: cents(sold.total),
+      no_cost: cents(sold.unknown),
+    },
     closed,
   };
 }

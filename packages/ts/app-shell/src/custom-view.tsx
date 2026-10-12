@@ -33,17 +33,17 @@ import {
   XIcon,
 } from 'lucide-react';
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { DrawerSection } from './drawer-section';
 import { useIsMobile } from './hooks/use-mobile';
 import { cn } from './lib/utils';
 import { type Crumb, Page } from './page';
 import { maskAmount, useAmountsHidden } from './shell';
 import { Tile } from './tile';
-import { type FilterField, TokenFilter, useTokenFilter } from './token-filter';
+import { type FilterField, type FilterToken, TokenFilter, useTokenFilter } from './token-filter';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
 import { Checkbox } from './ui/checkbox';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
 import { Popover, PopoverAnchor, PopoverContent } from './ui/popover';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './ui/resizable';
 import {
@@ -59,19 +59,24 @@ import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group';
 import { EditCell } from './view-edit-cell';
 import { ViewEditDialog, type ViewEditorSection } from './view-editor';
 import {
+  FORMULAS_GROUP,
   type ViewCellValue,
   type ViewDomain,
   type ViewField,
   chipsOf,
   computedOf,
+  filterFieldsOf,
+  groupOf,
   label,
   pick,
   rollUp,
   tilesOf,
   withFormulas,
+  withSavedFilters,
 } from './view-model';
 
-export type { ViewCellValue, ViewDomain, ViewField } from './view-model';
+export type { ViewCellValue, ViewDomain, ViewField, ViewFieldGroup } from './view-model';
+export { FORMULAS_GROUP } from './view-model';
 export { rollUp } from './view-model';
 export type { ViewEditorSection } from './view-editor';
 
@@ -179,9 +184,12 @@ const VIEW_SCROLL =
   '@container max-h-[calc(100svh-var(--shell-header-height)-var(--shell-status-height)-2*var(--shell-gutter))] overflow-auto';
 /** The table inside the view's scroller: it never scrolls on its own, so sticky rows pin to the view. */
 const IN_VIEW = '[&>[data-slot=table-container]]:overflow-visible';
-const PINNED_HEAD = 'sticky top-0 z-20 bg-card shadow-[inset_0_-1px_0_var(--color-border)]';
+// `--head-top` is the column-group band's height when the table draws one (Bikram, 2026-10-12).
+const PINNED_BAND = 'sticky top-0 z-20 h-(--row-h) bg-card';
+const PINNED_HEAD =
+  'sticky top-(--head-top,0px) z-20 bg-card shadow-[inset_0_-1px_0_var(--color-border)]';
 const PINNED_GROUP =
-  'sticky top-[calc(var(--row-h)-1px)] z-10 bg-[color-mix(in_oklab,var(--color-muted)_50%,var(--color-card))] shadow-[inset_0_1px_0_var(--color-border),inset_0_-1px_0_var(--color-border)]';
+  'sticky top-[calc(var(--head-top,0px)+var(--row-h)-1px)] z-10 bg-[color-mix(in_oklab,var(--color-muted)_50%,var(--color-card))] shadow-[inset_0_1px_0_var(--color-border),inset_0_-1px_0_var(--color-border)]';
 
 function SortIcon({ dir }: { dir: false | 'asc' | 'desc' }) {
   if (dir === 'asc') return <ArrowUpIcon className="size-3" />;
@@ -203,13 +211,15 @@ function DetailsBody<T extends RowData>({
 }) {
   const parts = domain.parts?.rows(row) ?? [];
   const by = domain.fields.find((f) => f.key === domain.parts?.by);
-  const sections = [
+  const sections: NonNullable<ViewDomain<T>['details']> = [
     ...(parts.length > 1 && by && domain.parts
       ? [
           {
             id: '_parts',
-            label: `${domain.parts.label} (${parts.length})`,
+            label: domain.parts.label,
             icon: by.icon,
+            open: true,
+            count: () => parts.length,
             render: () => (
               <div className="-mx-1 rounded-md border">
                 <RowsTable
@@ -235,18 +245,18 @@ function DetailsBody<T extends RowData>({
     ...(domain.details ?? []),
   ];
   return (
-    <div className="flex flex-col gap-1 px-4 pb-4">
+    <div className="flex flex-col px-4 pb-4">
       {sections.map((s) => (
-        <Collapsible key={s.id} defaultOpen className="group/section border-t py-2">
-          <CollapsibleTrigger asChild>
-            <Button variant="ghost" size="sm" className="w-full justify-start px-1">
-              <s.icon />
-              {s.label}
-              <ChevronRightIcon className="ml-auto transition-transform group-data-[state=open]/section:rotate-90" />
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="pt-1">{s.render(row)}</CollapsibleContent>
-        </Collapsible>
+        <DrawerSection
+          key={`${domain.rowKey(row)}:${s.id}`}
+          icon={s.icon}
+          title={s.label}
+          count={s.count?.(row)}
+          hint={s.hint?.(row)}
+          defaultOpen={typeof s.open === 'function' ? s.open(row) : s.open}
+        >
+          {s.render(row)}
+        </DrawerSection>
       ))}
     </div>
   );
@@ -363,6 +373,9 @@ export interface CustomViewPageProps<T> {
   onOpen?: (row: T) => void;
   /** Buttons at the end of a group row's label (pin a group), given its key and rows. */
   groupActions?: (key: string, rows: T[]) => ReactNode;
+  /** Told the filter's tokens whenever they change, so a desk can load rows for what they pick
+   *  (the Symbols view's `in` filter, Bikram 2026-10-12). */
+  onTokens?: (tokens: FilterToken[]) => void;
 }
 
 const GROUP_NONE = '_none';
@@ -389,22 +402,30 @@ export function CustomViewPage<T extends RowData>({
   selection,
   onOpen,
   groupActions,
+  onTokens,
 }: CustomViewPageProps<T>) {
   const domain = useMemo(() => withFormulas(base, config), [base, config]);
   const columns = pick(domain.fields, config.columns);
   const filterFields = useMemo<FilterField<T>[]>(
     () =>
-      pick(
-        domain.fields.filter((f) => f.filterable),
-        config.filters.fields,
-      ).map((f) => ({
+      filterFieldsOf(domain.fields, config.filters.fields).map((f) => ({
         key: f.key,
         label: f.label,
         icon: f.icon,
-        values: (row: T) => {
-          const v = f.value(row);
-          return v === null ? [] : [String(v)];
-        },
+        values:
+          f.values ??
+          ((row: T) => {
+            const v = f.value(row);
+            return v === null ? [] : [String(v)];
+          }),
+        // Number fields filter by a condition (`> 100`), formulas included (Bikram, 2026-10-11).
+        number:
+          f.format === 'text'
+            ? undefined
+            : (row: T) => {
+                const v = f.value(row);
+                return typeof v === 'number' ? v : null;
+              },
       })),
     [domain.fields, config.filters.fields],
   );
@@ -413,6 +434,7 @@ export function CustomViewPage<T extends RowData>({
     initial: config.filters.default,
   });
   useEffect(() => onShownRows?.(filter.results), [onShownRows, filter.results]);
+  useEffect(() => onTokens?.(filter.tokens), [onTokens, filter.tokens]);
   const groupable = pick(
     domain.fields.filter((f) => f.groupable),
     config.group.fields,
@@ -427,7 +449,20 @@ export function CustomViewPage<T extends RowData>({
   const header = (
     <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center">
       {controls && <div className="flex flex-wrap items-center gap-2">{controls}</div>}
-      <TokenFilter filter={filter} label={`Filter ${config.name}`} className="md:max-w-md" />
+      <TokenFilter
+        filter={filter}
+        label={`Filter ${config.name}`}
+        className="md:max-w-md"
+        saved={config.filters.default}
+        onSave={
+          onConfigChange &&
+          ((tokens) =>
+            onConfigChange({
+              ...config,
+              filters: withSavedFilters(domain.fields, config.filters, tokens),
+            }))
+        }
+      />
       {(groupable.length > 0 || config.pivot) && (
         <ToggleGroup
           type="single"
@@ -555,19 +590,23 @@ export function CustomViewPage<T extends RowData>({
                       onDetails={onOpen ?? (domain.details?.length ? setDetails : undefined)}
                       selection={selection}
                       groupActions={groupActions}
+                      sort={config.sort}
                     />
                   ))}
               </Card>
             </div>
           </div>
         );
-        const title = details === null ? '' : (rowTitle?.(details) ?? domain.rowKey(details));
+        // The open row as the rows are now, so an edit made in the drawer shows in it.
+        const key = details === null ? null : domain.rowKey(details);
+        const open = key === null ? null : (rows.find((r) => domain.rowKey(r) === key) ?? details);
+        const title = open === null ? '' : (rowTitle?.(open) ?? domain.rowKey(open));
         return (
           <>
             {main}
-            <DetailsSheet row={details} title={title} onClose={() => setDetails(null)}>
-              {details !== null && (
-                <DetailsBody domain={domain} row={details} columns={columns} chips={chips} />
+            <DetailsSheet row={open} title={title} onClose={() => setDetails(null)}>
+              {open !== null && (
+                <DetailsBody domain={domain} row={open} columns={columns} chips={chips} />
               )}
             </DetailsSheet>
           </>
@@ -590,6 +629,30 @@ export function CustomViewPage<T extends RowData>({
       )}
     </Page>
   );
+}
+
+/**
+ * The column-group band over the headers (Bikram, 2026-10-12): one cell per run of columns from
+ * the same group (Holding, Symbol, Account, Formulas), drawn only when the columns span groups.
+ */
+function bandsOf<T>(domain: ViewDomain<T>, shown: ViewField<T>[]) {
+  if (!domain.groups?.length) return null;
+  const runs: { id: string; label: string; color: string; span: number }[] = [];
+  for (const f of shown) {
+    const id = groupOf(domain, f);
+    const last = runs.at(-1);
+    if (last?.id === id) last.span++;
+    else {
+      const g = domain.groups.find((x) => x.id === id);
+      runs.push({
+        id,
+        label: id === FORMULAS_GROUP ? 'Formulas' : (g?.label ?? ''),
+        color: g?.color ?? 'var(--color-muted-foreground)',
+        span: 1,
+      });
+    }
+  }
+  return new Set(runs.map((r) => r.id)).size > 1 ? runs : null;
 }
 
 const alignOf = (format: ViewFormat) => (format === 'text' ? 'text-left' : 'text-right');
@@ -615,6 +678,7 @@ function RowsTable<T extends RowData>({
   onDetails,
   selection,
   groupActions,
+  sort,
 }: {
   domain: ViewDomain<T>;
   columns: ViewField<T>[];
@@ -626,8 +690,12 @@ function RowsTable<T extends RowData>({
   onDetails?: (row: T) => void;
   selection?: CustomViewPageProps<T>['selection'];
   groupActions?: CustomViewPageProps<T>['groupActions'];
+  /** The view's default sort (Bikram, 2026-10-12); a header click changes it for the visit. */
+  sort?: CustomViewConfig['sort'];
 }) {
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>(
+    sort && columns.some((f) => f.key === sort.key) ? [{ id: sort.key, desc: sort.desc }] : [],
+  );
   const [pageIndex, setPageIndex] = useState(0);
   const paging = paged && !groupBy && rows.length > PAGE_SIZE;
   const pagination: PaginationState = {
@@ -644,20 +712,24 @@ function RowsTable<T extends RowData>({
   );
   const shown = visible.filter((f) => !inline.includes(f));
   const computed = useMemo(() => computedOf(domain, rows, groupBy), [domain, rows, groupBy]);
-  // Values in use per editable field, offered when a cell is edited.
+  // Values per editable field, offered when a cell is edited: the field's own list when it has
+  // one (every value, in use or not), else the values in the shown rows.
   const options = useMemo(() => {
-    const m = new Map<string, string[]>();
+    const m = new Map<string, { inUse: string[]; unused: string[] }>();
     for (const f of visible)
       if (f.edit)
         m.set(
           f.key,
-          [
-            ...new Set(
-              rows
-                .map((r) => f.value(r))
-                .filter((v): v is string => typeof v === 'string' && v !== ''),
-            ),
-          ].sort(),
+          f.edit.options?.() ?? {
+            inUse: [
+              ...new Set(
+                rows
+                  .map((r) => f.value(r))
+                  .filter((v): v is string => typeof v === 'string' && v !== ''),
+              ),
+            ].sort(),
+            unused: [],
+          },
         );
     return m;
   }, [visible, rows]);
@@ -679,7 +751,8 @@ function RowsTable<T extends RowData>({
       <EditCell
         label={f.label}
         value={typeof v === 'string' && v !== '' ? v : null}
-        options={options.get(f.key) ?? []}
+        options={options.get(f.key)?.inUse ?? []}
+        unused={options.get(f.key)?.unused}
         chip={chip}
         note={edit.note?.(row)}
         onSave={(value) => edit.save(row, value)}
@@ -741,6 +814,7 @@ function RowsTable<T extends RowData>({
     return [...m];
   }, [groupBy, sorted]);
   const span = shown.length + (selection ? 1 : 0);
+  const bands = bandsOf(domain, shown);
   const keyOf = domain.rowKey;
   const toggle = (keys: string[], on: boolean) => {
     if (!selection) return;
@@ -820,9 +894,24 @@ function RowsTable<T extends RowData>({
   );
 
   return (
-    <div className={paged ? IN_VIEW : 'overflow-x-auto'}>
+    <div className={cn(paged ? IN_VIEW : 'overflow-x-auto', bands && '[--head-top:var(--row-h)]')}>
       <Table>
         <TableHeader>
+          {bands && (
+            <TableRow className="hover:bg-transparent">
+              {selection && <TableHead className={PINNED_BAND} />}
+              {bands.map((b, i) => (
+                <TableHead
+                  key={`${b.id}:${i}`}
+                  colSpan={b.span}
+                  className={cn(PINNED_BAND, 'text-xs font-medium', i > 0 && 'border-l')}
+                  style={{ boxShadow: `inset 0 -2px 0 ${b.color}`, color: b.color }}
+                >
+                  {b.label}
+                </TableHead>
+              ))}
+            </TableRow>
+          )}
           {table.getHeaderGroups().map((hg) => (
             <TableRow key={hg.id}>
               {selection && (

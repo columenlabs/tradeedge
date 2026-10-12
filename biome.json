@@ -15,7 +15,8 @@
       "**/tradeedge/src/components/ui/**",
       "**/researchedge/src/components/ui/**",
       "**/dataedge/src/components/ui/**",
-      "**/app-shell/src/ui/**"
+      "**/app-shell/src/ui/**",
+      "**/landing/public/vendor/**"
     ]
   },
   "organizeImports": { "enabled": true },

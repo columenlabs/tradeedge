@@ -1,3 +1,4 @@
+import { type ViewTokenOp, meetsNumber } from '@edgedesk/types/views';
 // The one filter box every view uses (Bikram, 2026-10-08): a click opens a menu grouped by field
 // with counts; picking a value adds it to that field's chip, ⊘ (or typing `-field:value`) excludes
 // it. One field: "in" any of its values and "not in" any excluded one; a chip's in/not in flips
@@ -5,7 +6,14 @@
 // and any field value. It filters the rows already loaded, on the client. The box is one row that
 // never grows; menu groups start collapsed; phones get a bottom sheet (Bikram, 2026-10-11).
 import { Command as CommandPrimitive } from 'cmdk';
-import { BanIcon, ChevronRightIcon, type LucideIcon, SearchIcon, XIcon } from 'lucide-react';
+import {
+  BanIcon,
+  ChevronRightIcon,
+  type LucideIcon,
+  SaveIcon,
+  SearchIcon,
+  XIcon,
+} from 'lucide-react';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useIsMobile } from './hooks/use-mobile';
 import { cn } from './lib/utils';
@@ -25,9 +33,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
+import { Input } from './ui/input';
 import { InputGroup, InputGroupAddon, InputGroupButton } from './ui/input-group';
 import { Popover, PopoverAnchor, PopoverContent } from './ui/popover';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
+import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group';
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 export interface FilterField<T> {
   key: string;
@@ -35,6 +46,11 @@ export interface FilterField<T> {
   icon: LucideIcon;
   /** The row's values for this field (a row can carry several, like symbols). */
   values: (row: T) => string[];
+  /**
+   * A number field (Bikram, 2026-10-11): filtered by one condition, `> 100`, `< 0`, `= 5` or
+   * between, instead of by values.
+   */
+  number?: (row: T) => number | null;
 }
 
 export interface FilterToken {
@@ -42,9 +58,18 @@ export interface FilterToken {
   value: string;
   /** Excluded: rows with this value are dropped ("not in"). */
   not?: boolean;
+  /** A number condition; `value` is a number, or `a..b` for between. */
+  op?: ViewTokenOp;
 }
 
-export const tokenText = (t: FilterToken) => `${t.not ? '-' : ''}${t.key}:${t.value}`;
+const OP_SIGN: Record<ViewTokenOp, string> = { gt: '>', lt: '<', eq: '=', between: '' };
+export const tokenText = (t: FilterToken) =>
+  `${t.not ? '-' : ''}${t.key}:${t.op ? OP_SIGN[t.op] : ''}${t.value}`;
+/** A number condition as people read it: `> 100`, `0 – 500`. */
+const conditionText = (t: FilterToken) =>
+  t.op === 'between' ? t.value.replace('..', ' – ') : `${OP_SIGN[t.op ?? 'eq']} ${t.value}`;
+/** `field:>100`, `field:<0`, `field:=5`, `field:0..500` typed out for a number field. */
+const NUMBER_TYPED = /^(\w+):(>|<|=)?(-?\d+(?:\.\d+)?)(?:\.\.(-?\d+(?:\.\d+)?))?$/;
 /** Same field and value, included or not: a value sits in one chip only. */
 const same = (a: FilterToken, b: FilterToken) =>
   a.key === b.key && a.value.toLowerCase() === b.value.toLowerCase();
@@ -54,14 +79,19 @@ const token = (key: string, value: string, not: boolean): FilterToken =>
 /** Keeps the rows whose values pass every field's tokens, skipping the field `except`. */
 function passes(
   values: Record<string, string[]>,
+  nums: Record<string, number | null>,
   tokens: FilterToken[],
-  fields: { key: string }[],
+  fields: { key: string; number?: unknown }[],
   except?: string,
 ) {
   for (const f of fields) {
     if (f.key === except) continue;
-    const have = values[f.key] ?? [];
     const of = tokens.filter((t) => t.key === f.key);
+    if (f.number) {
+      if (!of.every((t) => meetsNumber(t.op, t.value, nums[f.key] ?? null))) return false;
+      continue;
+    }
+    const have = values[f.key] ?? [];
     const inc = of.filter((t) => !t.not).map((t) => t.value.toLowerCase());
     const exc = of.filter((t) => t.not).map((t) => t.value.toLowerCase());
     if (inc.length && !have.some((v) => inc.includes(v))) return false;
@@ -93,8 +123,11 @@ export function useTokenFilter<T>(
       rows.map((row) => ({
         row,
         values: Object.fromEntries(
-          fields.map((f) => [f.key, f.values(row).map((v) => v.toLowerCase())]),
+          fields.map((f) => [f.key, f.number ? [] : f.values(row).map((v) => v.toLowerCase())]),
         ) as Record<string, string[]>,
+        nums: Object.fromEntries(
+          fields.filter((f) => f.number).map((f) => [f.key, f.number?.(row) ?? null]),
+        ) as Record<string, number | null>,
         text: (textOf?.(row) ?? []).map((v) => v.toLowerCase()),
       })),
     [rows, fields, textOf],
@@ -107,8 +140,8 @@ export function useTokenFilter<T>(
         ? q
         : '';
     return indexed
-      .filter(({ values, text: hay }) => {
-        if (!passes(values, tokens, fields)) return false;
+      .filter(({ values, nums, text: hay }) => {
+        if (!passes(values, nums, tokens, fields)) return false;
         if (!free) return true;
         return [...hay, ...Object.values(values).flat()].some((v) => v.includes(free));
       })
@@ -181,10 +214,13 @@ function FilterChip({
   const verb = chip.not ? 'not in' : 'in';
   const values = chip.tokens.map((t) => t.value).join(', ');
   const shown = form !== 'full' && chip.tokens.length > 1 ? String(chip.tokens.length) : values;
+  // A number field's chip holds its one condition, `> 100`.
+  const condition = field?.number && chip.tokens[0];
+  const title = condition ? `${name} ${conditionText(condition)}` : `${name} ${verb} ${values}`;
   return (
     <Badge
       variant="secondary"
-      title={`${name} ${verb} ${values}`}
+      title={title}
       className={cn('h-6 max-w-56 justify-start gap-0 pr-0.5 pl-1 font-normal', className)}
     >
       <Button
@@ -197,34 +233,48 @@ function FilterChip({
         {field && <field.icon className="size-3" />}
         {name}
       </Button>
-      <Button
-        variant="ghost"
-        size="xs"
-        className={cn(
-          'h-5 shrink-0 px-1 font-normal text-muted-foreground',
-          chip.not && 'text-destructive hover:text-destructive',
-        )}
-        aria-label={`${name} ${verb}: switch to ${chip.not ? 'in' : 'not in'}`}
-        onClick={onFlip}
-      >
-        {form === 'short' ? (chip.not ? '≠' : '=') : verb}
-      </Button>
-      <Button
-        variant="ghost"
-        size="xs"
-        className={cn('h-5 min-w-0 shrink px-1 font-normal', wrap && 'h-auto py-0.5')}
-        aria-label={`Edit ${name} values`}
-        onClick={onEdit}
-      >
-        <span className={cn('num', wrap ? 'text-left whitespace-normal' : 'truncate')}>
-          {shown}
-        </span>
-      </Button>
+      {condition ? (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="h-5 min-w-0 shrink px-1 font-normal"
+          aria-label={`Edit ${name} condition`}
+          onClick={onEdit}
+        >
+          <span className="num truncate">{conditionText(condition)}</span>
+        </Button>
+      ) : (
+        <>
+          <Button
+            variant="ghost"
+            size="xs"
+            className={cn(
+              'h-5 shrink-0 px-1 font-normal text-muted-foreground',
+              chip.not && 'text-destructive hover:text-destructive',
+            )}
+            aria-label={`${name} ${verb}: switch to ${chip.not ? 'in' : 'not in'}`}
+            onClick={onFlip}
+          >
+            {form === 'short' ? (chip.not ? '≠' : '=') : verb}
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            className={cn('h-5 min-w-0 shrink px-1 font-normal', wrap && 'h-auto py-0.5')}
+            aria-label={`Edit ${name} values`}
+            onClick={onEdit}
+          >
+            <span className={cn('num', wrap ? 'text-left whitespace-normal' : 'truncate')}>
+              {shown}
+            </span>
+          </Button>
+        </>
+      )}
       <Button
         variant="ghost"
         size="icon-xs"
         className="size-4 shrink-0 rounded-full"
-        aria-label={`Remove ${name} ${verb}`}
+        aria-label={`Remove ${title}`}
         onClick={onRemove}
       >
         <XIcon />
@@ -233,17 +283,132 @@ function FilterChip({
   );
 }
 
+const OPS: { op: ViewTokenOp; label: string }[] = [
+  { op: 'lt', label: 'Less' },
+  { op: 'gt', label: 'Greater' },
+  { op: 'between', label: 'Between' },
+];
+const isNumber = (v: string) => /^-?\d+(\.\d+)?$/.test(v.trim());
+
+/** A number field's condition in the menu, two lines (Bikram, 2026-10-12): Less than, Greater
+ * than or Between, then the number (0 by default). Each change filters at once. */
+function NumberCondition({
+  label,
+  current,
+  tall,
+  count,
+  onSet,
+}: {
+  label: string;
+  current?: FilterToken;
+  /** Phone: taller controls, and 16px text so the page doesn't zoom. */
+  tall: boolean;
+  /** How many rows a condition keeps. */
+  count: (op: ViewTokenOp, value: string) => number;
+  onSet: (op: ViewTokenOp, value: string) => void;
+}) {
+  const [from = '0', to = '0'] = current?.value.split('..') ?? [];
+  const [op, setOp] = useState<ViewTokenOp>(current?.op === 'eq' ? 'gt' : (current?.op ?? 'gt'));
+  const [a, setA] = useState(from);
+  const [b, setB] = useState(current?.op === 'between' ? to : '0');
+  const value = (o: ViewTokenOp, x: string, y: string) =>
+    o === 'between' ? `${x.trim()}..${y.trim()}` : x.trim();
+  const set = (o: ViewTokenOp, x: string, y: string) => {
+    if (isNumber(x) && (o !== 'between' || isNumber(y))) onSet(o, value(o, x, y));
+  };
+  const box = cn(
+    'min-w-0 flex-1 px-2 tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none',
+    tall ? 'h-10 text-base' : 'h-8 text-sm',
+  );
+  const ok = isNumber(a) && (op !== 'between' || isNumber(b));
+  return (
+    // Keys stay here: the menu would take Enter and the arrows.
+    <div
+      className="flex flex-col gap-1.5 py-1 pr-2 pl-12"
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') e.preventDefault();
+      }}
+    >
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        spacing={0}
+        value={current ? op : ''}
+        onValueChange={(v) => {
+          if (!v) return;
+          setOp(v as ViewTokenOp);
+          set(v as ViewTokenOp, a, b);
+        }}
+        aria-label={`${label} condition`}
+        className="w-full"
+      >
+        {OPS.map((o) => (
+          <ToggleGroupItem
+            key={o.op}
+            value={o.op}
+            className={cn('flex-1 font-normal', tall ? 'h-10 text-base' : 'h-8 text-sm')}
+          >
+            {o.label}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <div className="flex items-center gap-2">
+        <Input
+          type="number"
+          inputMode="decimal"
+          className={box}
+          aria-label={`${label} ${op === 'between' ? 'from' : 'value'}`}
+          value={a}
+          onFocus={(e) => e.target.select()}
+          onChange={(e) => {
+            setA(e.target.value);
+            set(op, e.target.value, b);
+          }}
+        />
+        {op === 'between' && (
+          <>
+            <span className="text-muted-foreground text-sm">and</span>
+            <Input
+              type="number"
+              inputMode="decimal"
+              className={box}
+              aria-label={`${label} to`}
+              value={b}
+              onFocus={(e) => e.target.select()}
+              onChange={(e) => {
+                setB(e.target.value);
+                set(op, a, e.target.value);
+              }}
+            />
+          </>
+        )}
+        <span className="num w-16 shrink-0 text-right text-muted-foreground text-xs">
+          {current && ok ? `${count(op, value(op, a, b))} rows` : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function TokenFilter<T>({
   filter,
   placeholder = 'Filter…',
   label = 'Filter',
   className,
+  saved,
+  onSave,
 }: {
   filter: TokenFilterState<T>;
   placeholder?: string;
   /** The input's accessible name. */
   label?: string;
   className?: string;
+  /** The view's saved filters; the save button shows when the box differs from them. */
+  saved?: FilterToken[];
+  /** Saves the box's filters as the view's own (Bikram, 2026-10-11). */
+  onSave?: (tokens: FilterToken[]) => void;
 }) {
   const { fields, indexed, tokens, setTokens, text, setText } = filter;
   // Phone: the box is one tappable row and the menu is a bottom sheet (Bikram, 2026-10-11).
@@ -254,11 +419,33 @@ export function TokenFilter<T>({
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const measure = useRef<HTMLDivElement>(null);
+  const menuBox = useRef<HTMLDivElement>(null);
 
   const add = (t: FilterToken) => {
     setTokens([...tokens.filter((x) => !same(x, t)), t]);
     setText('');
   };
+  // A number field holds one condition: a new one replaces it.
+  const addCondition = (key: string, op: ViewTokenOp, value: string) => {
+    setTokens([...tokens.filter((x) => x.key !== key), { key, value, op }]);
+    setText('');
+    if (!mobile) input.current?.focus();
+  };
+  // Rows a number condition keeps, given the other fields' tokens.
+  const numberCount = (key: string, op: ViewTokenOp, value: string) =>
+    indexed.filter(
+      (r) =>
+        passes(r.values, r.nums, tokens, fields, key) &&
+        meetsNumber(op, value, r.nums[key] ?? null),
+    ).length;
+  // Set as the number is typed: the box keeps focus.
+  const setCondition = (key: string, op: ViewTokenOp, value: string) =>
+    setTokens([...tokens.filter((x) => x.key !== key), { key, value, op }]);
+  const sameTokens = (a: FilterToken[], b: FilterToken[]) => {
+    const keyOf = (ts: FilterToken[]) => ts.map(tokenText).sort().join('\n');
+    return keyOf(a) === keyOf(b);
+  };
+  const dirty = !!onSave && !sameTokens(tokens, saved ?? []);
   // One chip per field and operator, in the order they were added.
   const chips = useMemo(() => {
     const out: Chip[] = [];
@@ -305,9 +492,17 @@ export function TokenFilter<T>({
     return fields
       .filter((f) => qKey === null || f.key.startsWith(qKey))
       .map((f) => {
+        if (f.number) {
+          const hit =
+            qKey !== null ||
+            !qValue ||
+            f.key.startsWith(qValue) ||
+            f.label.toLowerCase().startsWith(qValue);
+          return { field: f, values: [] as [string, number][], total: hit ? 1 : 0 };
+        }
         const counts = new Map<string, number>();
-        for (const { row, values } of indexed) {
-          if (!passes(values, tokens, fields, f.key)) continue;
+        for (const { row, values, nums } of indexed) {
+          if (!passes(values, nums, tokens, fields, f.key)) continue;
           for (const v of new Set(f.values(row))) counts.set(v, (counts.get(v) ?? 0) + 1);
         }
         const matches = [...counts]
@@ -374,6 +569,15 @@ export function TokenFilter<T>({
     } else if (e.key === 'Escape') {
       if (!mobile) setOpen(false);
     } else if (e.key === 'Enter') {
+      // `field:>100`, `field:0..500` typed out on a number field sets its condition.
+      const n = NUMBER_TYPED.exec(text.trim());
+      const nf = n && fields.find((x) => x.number && x.key === n[1]?.toLowerCase());
+      if (n?.[3] && nf) {
+        e.preventDefault();
+        const op = n[4] ? 'between' : n[2] === '>' ? 'gt' : n[2] === '<' ? 'lt' : 'eq';
+        addCondition(nf.key, op, n[4] ? `${n[3]}..${n[4]}` : n[3]);
+        return;
+      }
       // `field:value` (or `-field:value`) typed out in full adds the token even when no row has it.
       const m = /^(-?)(\w+):(\S+)$/.exec(text.trim());
       const f = m && fields.find((x) => x.key === m[2]?.toLowerCase());
@@ -392,6 +596,7 @@ export function TokenFilter<T>({
       <CommandEmpty>No matching values.</CommandEmpty>
       {facets.map(({ field, values, total }) => {
         const shown = searching || expanded.has(field.key);
+        const current = field.number && tokens.find((t) => t.key === field.key);
         return (
           <CommandGroup key={field.key} className="px-1 py-0.5">
             <CommandItem
@@ -405,8 +610,20 @@ export function TokenFilter<T>({
               />
               <field.icon className="text-muted-foreground" />
               {field.label}
-              <CommandShortcut className="num tracking-normal">{total}</CommandShortcut>
+              <CommandShortcut className="num tracking-normal">
+                {field.number ? (current ? conditionText(current) : '') : total}
+              </CommandShortcut>
             </CommandItem>
+            {shown && field.number && (
+              <NumberCondition
+                key={field.key}
+                label={field.label}
+                current={current || undefined}
+                tall={mobile}
+                count={(op, value) => numberCount(field.key, op, value)}
+                onSet={(op, value) => setCondition(field.key, op, value)}
+              />
+            )}
             {shown &&
               values.map(([value, count]) => (
                 <CommandItem
@@ -437,11 +654,27 @@ export function TokenFilter<T>({
     </>
   );
 
-  const clearButton = (tokens.length > 0 || text) && (
-    <InputGroupAddon align="inline-end" data-reserved>
-      <InputGroupButton size="icon-xs" aria-label="Clear filter" onClick={clear}>
-        <XIcon />
-      </InputGroupButton>
+  const clearButton = (dirty || tokens.length > 0 || text) && (
+    <InputGroupAddon align="inline-end" data-reserved className="gap-0.5">
+      {dirty && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <InputGroupButton
+              size="icon-xs"
+              aria-label="Save filters to view"
+              onClick={() => onSave?.(tokens)}
+            >
+              <SaveIcon />
+            </InputGroupButton>
+          </TooltipTrigger>
+          <TooltipContent>Save filters to view</TooltipContent>
+        </Tooltip>
+      )}
+      {(tokens.length > 0 || text) && (
+        <InputGroupButton size="icon-xs" aria-label="Clear filter" onClick={clear}>
+          <XIcon />
+        </InputGroupButton>
+      )}
     </InputGroupAddon>
   );
   // Off-screen copies of every chip, to measure what fits.
@@ -650,12 +883,16 @@ export function TokenFilter<T>({
               onKeyDown={onKeyDown}
               onFocus={() => setOpen(true)}
               onClick={() => setOpen(true)}
-              onBlur={() => setOpen(false)}
+              // Focus moving into the menu's number row keeps the menu open.
+              onBlur={(e) => {
+                if (!menuBox.current?.contains(e.relatedTarget as Node)) setOpen(false);
+              }}
             />
             {clearButton}
           </InputGroup>
         </PopoverAnchor>
         <PopoverContent
+          ref={menuBox}
           align="start"
           className="w-(--radix-popover-trigger-width) min-w-64 p-0"
           onOpenAutoFocus={(e) => e.preventDefault()}
@@ -664,7 +901,10 @@ export function TokenFilter<T>({
             if (box.current?.contains(e.target as Node)) e.preventDefault();
           }}
           // Clicks in the menu must not blur the input first.
-          onMouseDown={(e) => e.preventDefault()}
+          // (number inputs still take focus).
+          onMouseDown={(e) => {
+            if (!(e.target as HTMLElement).closest('input')) e.preventDefault();
+          }}
         >
           <CommandList aria-label="Filter suggestions">{menu}</CommandList>
         </PopoverContent>

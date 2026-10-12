@@ -7,7 +7,12 @@
  * - Outside the session: cached (memory + colo-shared cache) until the next open.
  * - Expirations: 5 min in memory, 1 h shared, at all times.
  */
-import { type LiveOptionsProvider, parseOccSymbol } from '@edgedesk/providers';
+import {
+  type LiveOptionsProvider,
+  type Split,
+  type SplitLookup,
+  parseOccSymbol,
+} from '@edgedesk/providers';
 import {
   type OptionChain,
   type OptionQuote,
@@ -146,6 +151,19 @@ export class MarketService {
   expirations(underlying: string): Promise<number[]> {
     const u = underlying.toUpperCase();
     return this.layered(`exp:${u}`, { staticTtlS: 3600 }, () => this.p().getExpirations(u));
+  }
+
+  /**
+   * Stock splits of `symbols` since `from` (the lot math splits older lots by them), cached 1 h like
+   * expirations. Empty without a provider that knows splits.
+   */
+  splits(symbols: string[], from: string): Promise<Split[]> {
+    const p = this.provider as (LiveOptionsProvider & Partial<SplitLookup>) | null;
+    if (!p?.getSplits || !symbols.length) return Promise.resolve([]);
+    const list = [...new Set(symbols.map((s) => s.toUpperCase()))].sort();
+    return this.layered(`splits:${from}:${list.join(',')}`, { staticTtlS: 3600 }, () =>
+      (p.getSplits as SplitLookup['getSplits'])(list, from),
+    );
   }
 
   /** Price quote, cached 5 min while the session is open (Bikram, 2026-10-09). `fresh` refetches it. */
