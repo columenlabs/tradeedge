@@ -1054,6 +1054,41 @@ export const earningsQuery = () =>
     queryFn: () => getJson<EarningsPage>('/api/v1/earnings'),
     staleTime: 60_000,
   });
+// ── Dashboard ▸ Calendar (Bikram, 2026-10-12): earnings, ex-dividend and macro days ──
+
+export type CalendarKind = 'earnings' | 'dividend' | 'macro';
+export interface CalendarEvent {
+  date: string;
+  kind: CalendarKind;
+  symbol: string;
+  held: boolean;
+  watched: boolean;
+  timing: string | null;
+  at: string | null;
+  verified: boolean;
+  eps_estimate: number | null;
+  amount: number | null;
+  result: { line: string; url: string; at: string } | null;
+  note: string | null;
+}
+export interface CalendarSource {
+  state: 'ok' | 'not_connected' | 'error';
+  error?: string;
+}
+export interface CalendarRead {
+  from: string;
+  to: string;
+  events: CalendarEvent[];
+  earnings: CalendarSource & { refreshed_at: string | null };
+  dividends: CalendarSource;
+  macro: CalendarSource;
+}
+export const calendarQuery = (from: string, to: string) =>
+  queryOptions({
+    queryKey: ['calendar', from, to],
+    queryFn: () => getJson<CalendarRead>(`/api/v1/calendar?from=${from}&to=${to}`),
+    staleTime: 5 * 60_000,
+  });
 /** App views open at `/posts/<id>`, a person's own at `/posts/views/<domain>/<id>`. */
 export const postViewPath = (v: { app?: boolean; id: string; domain: PostDomain }) =>
   v.app ? `/posts/${v.id}` : `/posts/views/${v.domain}/${v.id}`;

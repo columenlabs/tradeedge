@@ -140,7 +140,7 @@ export function buildOpenApi(origin: string) {
           },
         },
         Unauthorized: { description: 'Not signed in (Cloudflare Access)' },
-        RateLimited: { description: 'Per-identity rate limit (120/min on /api); retry after 60 s' },
+        RateLimited: { description: 'Per-identity rate limit (300/min on /api); retry after 60 s' },
       },
     },
   };
@@ -168,7 +168,7 @@ export function buildLlmsTxt(origin: string): string {
     '- `greeksSource`: `provider` (quoted) or `model` (implied from mid, e.g. 0DTE). Pass `min_dte: 1` to skip same-day expiries.',
     '- Screener/evaluator dollar figures are per 1 structure (options ×100); `net_premium` > 0 is a credit; null max_profit / max_loss = unlimited.',
     '- `pop` / `expected_value` are model estimates (lognormal, legs’ IV) at the front expiry.',
-    '- Rate limits: 60/min on /mcp, 120/min on /api per signed-in user.',
+    '- Rate limits: 60/min on /mcp, 300/min on /api per signed-in user.',
     '',
     '## Operations (MCP tool = REST endpoint)',
     '',

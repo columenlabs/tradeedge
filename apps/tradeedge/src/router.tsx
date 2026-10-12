@@ -7,7 +7,6 @@ import {
   redirect,
 } from '@tanstack/react-router';
 
-const DEFAULT_SYMBOL = 'SPY';
 const expOf = (v: unknown) => {
   const n = Number(v);
   return Number.isInteger(n) && n > 19000101 && n < 21000101 ? n : undefined;
@@ -26,8 +25,15 @@ const index = createRoute({
   getParentRoute: () => root,
   path: '/',
   beforeLoad: () => {
-    throw redirect({ to: '/trades/$symbol', params: { symbol: DEFAULT_SYMBOL } });
+    throw redirect({ to: '/dashboard' });
   },
+});
+
+// Dashboard (Bikram, 2026-10-12): the TradeEdge home page; its first tab is Calendar.
+const dashboard = createRoute({
+  getParentRoute: () => root,
+  path: '/dashboard',
+  component: lazyRouteComponent(() => import('@/routes/dashboard'), 'DashboardPage'),
 });
 
 const board = createRoute({
@@ -194,6 +200,7 @@ const schedules = createRoute({
 
 const routeTree = root.addChildren([
   index,
+  dashboard,
   board,
   trade,
   chain,

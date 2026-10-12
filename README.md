@@ -1,12 +1,14 @@
 # TradeEdge
 
-Options trading on live data, on your own Cloudflare account, built for AI agents.
+Manage your investments across all your brokers in one place, on real broker and market data, in your own Cloudflare account, with an AI agent working alongside you.
 
-- **Screeners:** build any options strategy (iron condor, jade lizard, your own) on the live chain and rank real trades.
-- **Trades board:** save trades, compare their payoff curves, track them.
-- **Holdings:** sync your brokers through your own free SnapTrade key, sign in to Robinhood, or keep a manual account for a broker neither can reach. Holdings, transactions and tax lots show as views you can filter, group and save.
+- **Holdings:** link up to 5 brokers with your own free SnapTrade Personal key, sign in to Robinhood, or keep a manual account for a broker neither can reach. Holdings, transactions and tax lots, priced live with your own free Alpaca key, tagged by sector and basket, in views you can filter, group, pivot and save.
+- **News:** Alpaca news, the X accounts you track (with your own paid twitterapi.io key) and earnings read from SEC 8-K filings for what you hold or watch. Cloudflare's free AI models tag each post with its symbols, sentiment and theme and fold repeats into one post.
+- **Screeners and trades:** build any options strategy (iron condor, jade lizard, your own) on the live chain, rank real trades, save them and compare their payoff curves.
 - **Notifications and logs:** get alerts on your phone (ntfy) or your own webhooks, and see every sync, agent call and change on the Logs page.
-- **MCP:** every screen is also a tool, so an agent (Claude, ChatGPT, any MCP client) can screen, compare and save trades for you at `/mcp`.
+- **MCP:** every screen is also a tool, so an agent (Claude, ChatGPT, any MCP client) can read your holdings and screen, compare and save trades for you at `/mcp`.
+
+Brokers that trade through SnapTrade (such as Kraken, Coinbase and tastytrade) will let TradeEdge place trades for you; that part is in progress and coming soon.
 
 [TradeEdge](https://edgedesk.app/trade/) is one app of the [EdgeDesk](https://edgedesk.app) suite. This repository is a read-only copy of it, published from EdgeDesk with each release; pull requests are not merged here.
 
@@ -30,6 +32,7 @@ You need:
 | Live quotes and chains | your Alpaca key, added in Settings ▸ Integrations |
 | Broker holdings and tax lots | your SnapTrade Personal key (free, up to 5 brokers; tax lots for eligible brokers) |
 | Robinhood | sign in from Settings ▸ Integrations (the sign-in ends on a `localhost` address you paste back into the app) |
+| News | Alpaca news on your Alpaca key; X posts on your own twitterapi.io key; earnings from SEC 8-K filings with your Robinhood sign-in (for the earnings calendar); tagged on Cloudflare Workers AI in your own account |
 | Notifications | ntfy (with your own ntfy.sh access token) and up to 10 webhooks, set in Settings ▸ Integrations |
 | Historical option chains | no (`/api/v1/history/*` answers 503) |
 

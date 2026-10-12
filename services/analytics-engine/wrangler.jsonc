@@ -44,11 +44,12 @@
   ],
 
   // Per-identity limits (key = Access subject, else client IP). Protects the live-data quota.
+  // /api: 300/min, since one TradeEdge page load is about 15 calls (120 ran out after 8 refreshes).
   "ratelimits": [
     {
       "name": "API_RATE_LIMITER",
       "namespace_id": "1101",
-      "simple": { "limit": 120, "period": 60 }
+      "simple": { "limit": 300, "period": 60 }
     },
     { "name": "MCP_RATE_LIMITER", "namespace_id": "1102", "simple": { "limit": 60, "period": 60 } }
   ]

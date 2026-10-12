@@ -10,6 +10,7 @@ import {
   deleteLogView,
   deletePortfolioView,
   deletePostView,
+  integrationsQuery,
   logViewPath,
   logViewsQuery,
   portfolioViewPath,
@@ -26,7 +27,7 @@ import {
 import { signedPct, tone } from '@/lib/format';
 import { useTradeGroups } from '@/lib/use-trades';
 import { cn } from '@/lib/utils';
-import { AppShell, SidebarSection, viewIcon } from '@edgedesk/app-shell';
+import { AppShell, NavGroup, SidebarSection, viewIcon } from '@edgedesk/app-shell';
 import { Button } from '@edgedesk/app-shell/ui/button';
 import {
   Dialog,
@@ -343,17 +344,23 @@ function SymbolsSection() {
 /**
  * Autopilot (Bikram, 2026-10-12): Overview, one item per basket (a dot when a rebalance is due, a
  * hand in Suggest mode), then Autopilot queue, To place and Order history. `+` starts a new basket.
+ * Marked [WIP] until it has a working setup; a self-hosted copy (no built-in DataEdge) shows only
+ * the name (Bikram, 2026-10-12).
  */
 function AutopilotSection() {
   const navigate = useNavigate();
-  const overview = useQuery(autopilotQuery());
+  const integrations = useQuery(integrationsQuery(false));
+  const hosted = integrations.data?.dataedge.built_in === true;
+  const overview = useQuery({ ...autopilotQuery(), enabled: hosted });
   const o = overview.data;
   const count = (n: number | undefined, warn = false) =>
     n ? <span className={cn(warn && 'text-warning')}>{n}</span> : undefined;
+  if (!integrations.isPending && !hosted)
+    return <SidebarSection label="Autopilot [WIP]" items={[]} />;
   return (
     <SidebarSection
-      label="Autopilot"
-      loading={overview.isPending}
+      label="Autopilot [WIP]"
+      loading={integrations.isPending || overview.isPending}
       onAdd={() => void navigate({ to: '/baskets/new' })}
       addLabel="New basket"
       items={[
@@ -500,6 +507,7 @@ export function StrategyShell() {
         onSchedules={() => void navigate({ to: '/schedules' })}
         nav={
           <>
+            <NavGroup items={[{ title: 'Dashboard', to: '/dashboard', icon: LayoutGrid }]} />
             <TradesSection />
             <ScreenersSection />
             <WatchlistSection />

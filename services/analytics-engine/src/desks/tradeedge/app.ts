@@ -25,6 +25,7 @@ import { customViewRoutes } from '../../views/custom-views';
 import { CustomViews } from '../../views/store';
 import { apiRoutes } from './api';
 import { Autopilot, autopilotRoutes, priceFeed } from './autopilot';
+import { CalendarService, calendarRoutes } from './calendar';
 import { Earnings, earningsRoutes } from './earnings';
 import { Integrations, type SendNotice, integrationRoutes } from './integrations';
 import { Logs, logRequests, logRoutes } from './logs';
@@ -426,6 +427,14 @@ export function tradeedgeRoutes(
   // Symbol fields (Bikram, 2026-10-12): the person's Robinhood sign-in and DataEdge market data.
   const symbols = new SymbolFactsService(ctx.history, integrations);
   app.route('/api/symbols', symbolRoutes(symbols));
+  // Dashboard ▸ Calendar (Bikram, 2026-10-12): earnings, ex-dividend and macro days.
+  if (deps.portfolios && deps.watchlist)
+    app.route(
+      '/api/calendar',
+      calendarRoutes(
+        new CalendarService(deps.portfolios, deps.watchlist, symbols, deps.earnings, integrations),
+      ),
+    );
   app.route('/api', apiRoutes(market, ctx, integrations));
   const access =
     deps.accessVerifier !== undefined
